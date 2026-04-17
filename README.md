@@ -108,7 +108,7 @@ Agro-LoRa resuelve el problema del cableado en sistemas de riego distribuidos. E
 ### 1. Clonar el repositorio
 
 ```bash
-git clone https://github.com/tu-usuario/Agro-LoRa.git
+git clone https://github.com/nselar/Agro-LoRa.git
 cd Agro-LoRa
 ```
 
@@ -427,7 +427,7 @@ Agro-LoRa/
 
 ### Reportar errores
 
-Abre un [issue](https://github.com/tu-usuario/Agro-LoRa/issues) indicando:
+Abre un [issue](https://github.com/nselar/Agro-LoRa/issues) indicando:
 - Hardware utilizado y revisión de placa.
 - Versión de PlatformIO y de las librerías.
 - Logs del monitor serie relevantes.
