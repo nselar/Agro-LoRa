@@ -128,6 +128,30 @@ uint8_t    registeredCount = 0;         // Número de nodos actualmente registra
 #define ISTS_NODE1_FAULT  0x02
 #define ISTS_NODE2_FAULT  0x03
 
+// Discrete Inputs – estado VFD (solo lectura por Agrónic)
+#define ISTS_VFD_RUNNING  0x04   // 1 = variador en marcha
+#define ISTS_VFD_FAULT    0x05   // 1 = variador en fallo/trip
+
+// Input Registers – medidas VFD (solo lectura por Agrónic, FC04)
+#define IREG_VFD_FREQ     0x00   // Frecuencia real (0.01 Hz; ej: 5000 = 50.00 Hz)
+#define IREG_VFD_CURR     0x01   // Corriente motor (0.1 A;  ej: 15   = 1.5 A)
+
+// ==========================================
+// 5b. VARIADOR ABB ACQ80-04 (Modbus MASTER)
+// ==========================================
+// Serial2 → MAX3485 → bus RS485 dedicado al variador
+#define VFD_TX_PIN    19
+#define VFD_RX_PIN    20
+#define VFD_DE_PIN    15
+
+#define VFD_SLAVE_ID  1     // Parámetro 58.03 del ACQ80
+#define VFD_BAUD      9600  // Parámetro 58.01 del ACQ80
+
+// Registros Holding del ACQ80 (perfil "ABB Drives", FC03, 0-indexed)
+#define VFD_REG_SW    2     // Status Word    – bit2=RUN, bit3=FAULT
+#define VFD_REG_FREQ  3     // Output Freq    – unidad según param 46.01
+#define VFD_REG_CURR  4     // Motor Current  – unidad según param 46.02
+
 // ==========================================
 // 6. PARÁMETROS DE TRANSMISIÓN
 // ==========================================
@@ -141,6 +165,7 @@ uint8_t    registeredCount = 0;         // Número de nodos actualmente registra
 SX1262 radio = new Module(LORA_NSS, LORA_DIO1, LORA_NRST, LORA_BUSY);
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RST);
 ModbusRTU mb;
+ModbusRTU vfd;
 Preferences prefs;
 
 uint32_t msgCounter = 0;
@@ -150,6 +175,13 @@ unsigned long lastDisplayUpdate  = 0;
 unsigned long lastTimeoutCheck   = 0;
 
 volatile bool gwReceivedFlag = false;
+
+// Estado VFD (actualizado por callback Modbus master)
+uint16_t      vfdRawData[3]    = {0};  // [SW, FREQ, CURR]
+bool          vfdPollPending   = false;
+bool          vfdRunning       = false;
+bool          vfdFault         = false;
+unsigned long lastVfdPoll      = 0;
 
 // ==========================================
 // 8. FUNCIONES AUXILIARES
@@ -231,11 +263,15 @@ void updateDisplay(const String& status, const String& lastCmd) {
     (registeredCount >= 1) ? (nodes[1].alive ? "OK " : "OFF") : "---",
     (registeredCount >= 2) ? (nodes[2].alive ? "OK " : "OFF") : "---");
 
-  display.setCursor(0, 38);
-  display.print("Estado: ");
+  display.setCursor(0, 36);
+  display.printf("VFD:%s%s",
+    vfdRunning ? "RUN " : "STOP",
+    vfdFault   ? " FLT" : "    ");
+
+  display.setCursor(0, 48);
   display.print(status);
 
-  display.setCursor(0, 52);
+  display.setCursor(0, 56);
   display.print(lastCmd);
 
   display.display();
@@ -247,6 +283,33 @@ void updateModbusHealth() {
   mb.Ists(ISTS_NODE2_ALIVE, (registeredCount >= 2) ? nodes[2].alive : false);
   mb.Ists(ISTS_NODE1_FAULT, (registeredCount >= 1) ? nodes[1].fault : false);
   mb.Ists(ISTS_NODE2_FAULT, (registeredCount >= 2) ? nodes[2].fault : false);
+}
+
+// Callback Modbus master: se llama cuando llega la respuesta del variador
+bool vfdReadCb(Modbus::ResultCode event, uint16_t transactionId, void* data) {
+  vfdPollPending = false;
+  if (event != Modbus::EX_SUCCESS) {
+    Serial.printf("[VFD] Error lectura Modbus: %d\n", event);
+    return true;
+  }
+  uint16_t sw   = vfdRawData[0];
+  uint16_t freq = vfdRawData[1];
+  uint16_t curr = vfdRawData[2];
+
+  vfdRunning = (sw >> 2) & 0x01;  // Status Word bit 2 = RUN
+  vfdFault   = (sw >> 3) & 0x01;  // Status Word bit 3 = FAULT/TRIP
+
+  mb.Ists(ISTS_VFD_RUNNING, vfdRunning);
+  mb.Ists(ISTS_VFD_FAULT,   vfdFault);
+  mb.Ireg(IREG_VFD_FREQ,    freq);
+  mb.Ireg(IREG_VFD_CURR,    curr);
+
+  Serial.printf("[VFD] SW=0x%04X | %s | %.2f Hz | %.1f A\n",
+                sw,
+                vfdRunning ? "RUN " : "STOP",
+                freq / 100.0f,
+                curr / 10.0f);
+  return true;
 }
 
 // Procesa un paquete de estado (ACK / heartbeat / reset) recibido de un nodo
@@ -482,11 +545,21 @@ void setup() {
   mb.slave(SLAVE_ID);
   mb.addCoil(COIL_VALVE_1, false);
   mb.addCoil(COIL_VALVE_2, false);
-  mb.addIsts(ISTS_NODE1_ALIVE, false);
-  mb.addIsts(ISTS_NODE2_ALIVE, false);
-  mb.addIsts(ISTS_NODE1_FAULT, false);
-  mb.addIsts(ISTS_NODE2_FAULT, false);
+  mb.addIsts(ISTS_NODE1_ALIVE,  false);
+  mb.addIsts(ISTS_NODE2_ALIVE,  false);
+  mb.addIsts(ISTS_NODE1_FAULT,  false);
+  mb.addIsts(ISTS_NODE2_FAULT,  false);
+  mb.addIsts(ISTS_VFD_RUNNING,  false);
+  mb.addIsts(ISTS_VFD_FAULT,    false);
+  mb.addIreg(IREG_VFD_FREQ,     0);
+  mb.addIreg(IREG_VFD_CURR,     0);
   Serial.println("✓ Modbus RTU Esclavo Iniciado (ID=" + String(SLAVE_ID) + ")");
+
+  // Variador ABB ACQ80-04 – Modbus master en Serial2
+  Serial2.begin(VFD_BAUD, SERIAL_8N1, VFD_RX_PIN, VFD_TX_PIN);
+  vfd.begin(&Serial2, VFD_DE_PIN);
+  vfd.master();
+  Serial.println("✓ Modbus RTU Master VFD Iniciado (Serial2, ID esclavo=" + String(VFD_SLAVE_ID) + ")");
 
   // NVS: recuperar msgCounter y tabla de registro de nodos
   prefs.begin("agro", false);
@@ -512,8 +585,16 @@ void setup() {
 // 10. LOOP
 // ==========================================
 void loop() {
-  // 1. MODBUS: atender al Agrónic
+  // 1. MODBUS: atender al Agrónic + procesar respuestas del variador
   mb.task();
+  vfd.task();
+
+  // 1b. POLLING VFD: leer SW + FREQ + CURR cada 2 s (no bloqueante)
+  if (!vfdPollPending && millis() - lastVfdPoll > 2000) {
+    lastVfdPoll    = millis();
+    vfdPollPending = true;
+    vfd.readHregs(VFD_SLAVE_ID, VFD_REG_SW, 3, vfdRawData, vfdReadCb);
+  }
 
   // 2. RECEPCIÓN LORA: heartbeats, ACKs y solicitudes de registro
   if (gwReceivedFlag) {
