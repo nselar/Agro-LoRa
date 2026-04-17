@@ -26,6 +26,15 @@ Agro-LoRa resuelve el problema del cableado en sistemas de riego distribuidos. E
  │  • Modbus Slave ID=1             │              LoRa SF9
  │  • Registro dinámico de nodos    │
  │  • HMAC-SHA256 + anti-replay     │
+ │  • Modbus Master → VFD (RS485)   │
+ └──────────────────────────────────┘
+          │
+          │ Modbus RTU 9600 baud (RS485)
+          ▼
+ ┌──────────────────────────────────┐
+ │  VFD ABB ACQ80-04                │
+ │  (Variador de Frecuencia)        │
+ │  Estado leído cada 2 s           │
  └──────────────────────────────────┘
           │                    │
           ▼                    ▼
@@ -51,6 +60,7 @@ Agro-LoRa resuelve el problema del cableado en sistemas de riego distribuidos. E
 - **OLED en ambos nodos** para monitoreo local sin necesidad de ordenador.
 - **Watchdog** en nodos de campo: reset automático si el firmware se cuelga más de 10 s.
 - **Detección de resets anormales**: el nodo reporta al gateway cualquier pánico, watchdog o brownout.
+- **Monitorización de variador ABB ACQ80-04**: el gateway actúa también como Modbus master sobre un segundo bus RS485 y lee estado (RUN/STOP/FALLO), frecuencia y corriente del variador cada 2 s, exponiéndolo al Agrónic como Discrete Inputs e Input Registers.
 
 ---
 
@@ -62,7 +72,8 @@ Agro-LoRa resuelve el problema del cableado en sistemas de riego distribuidos. E
 |---|---|---|
 | Microcontrolador | Heltec WiFi LoRa 32 V3 | ESP32-S3 + SX1262 integrados |
 | Transceptor LoRa | SX1262 (integrado) | 868 MHz, hasta 22 dBm |
-| Interfaz RS485 | MAX3485 o similar | Comunicación Modbus con Agrónic |
+| Interfaz RS485 #1 | MAX3485 o similar | Modbus RTU esclavo → Agrónic 2500 (Serial1, pines 47/48/45) |
+| Interfaz RS485 #2 | MAX3485 o similar | Modbus RTU master → VFD ABB ACQ80 (Serial2, pines 19/20/15) |
 | Display OLED | SSD1306 128×64 (integrado) | Estado del sistema |
 | Alimentación | 5V DC | Vía USB-C o regulador externo |
 
@@ -176,6 +187,8 @@ Desde la consola del gateway puedes ver el proceso en tiempo real:
 | `ACK_TIMEOUT_MS` | `Nodo_Caseta/src/main.cpp` | `4000` | Timeout de espera de ACK (ms) |
 | `HEARTBEAT_TIMEOUT_MS` | `Nodo_Caseta/src/main.cpp` | `720000` | Tiempo sin heartbeat para considerar nodo caído (12 min) |
 | `MAX_NODES` | `Nodo_Caseta/src/main.cpp` | `8` | Máximo de nodos de campo |
+| `VFD_SLAVE_ID` | `Nodo_Caseta/src/main.cpp` | `1` | ID Modbus del variador ABB |
+| `VFD_BAUD` | `Nodo_Caseta/src/main.cpp` | `9600` | Baud rate bus RS485 del variador |
 
 ### Parámetros del Nodo Sector
 
@@ -210,6 +223,7 @@ Actúa de puente entre el programador Agrónic y los nodos de campo.
 - Recibe órdenes de válvula vía Coils Modbus y las transmite por LoRa.
 - Mantiene una tabla de registro de nodos (chipId → ID) persistida en NVS.
 - Monitorea la salud de cada nodo vía heartbeats y expone el estado como Discrete Inputs.
+- Master Modbus RTU hacia el variador ABB ACQ80-04: lee estado, frecuencia y corriente cada 2 s y los publica al Agrónic vía FC02 (Discrete Inputs) y FC04 (Input Registers).
 - Botón físico (PRG, pin 0) para alternar manualmente la válvula 1.
 
 **Comandos por terminal serie (115200 baud):**
@@ -325,8 +339,19 @@ El Agrónic escribe el coil. El gateway detecta el cambio, envía el comando LoR
 | `0x0001` | `ISTS_NODE2_ALIVE` | 1=nodo 2 activo |
 | `0x0002` | `ISTS_NODE1_FAULT` | 1=fallo activo en nodo 1 |
 | `0x0003` | `ISTS_NODE2_FAULT` | 1=fallo activo en nodo 2 |
+| `0x0004` | `ISTS_VFD_RUNNING` | 1=variador en marcha (bit2 de Status Word ABB) |
+| `0x0005` | `ISTS_VFD_FAULT` | 1=fallo/trip activo en el variador (bit3 de Status Word ABB) |
 
 El Agrónic puede leer estas entradas para disparar alarmas o detener el programa de riego.
+
+### Input Registers (FC04 lectura)
+
+| Dirección | Nombre | Escala | Descripción |
+|---|---|---|---|
+| `0x0000` | `IREG_VFD_FREQ` | ÷100 → Hz | Frecuencia de salida del variador (raw ABB: 0.01 Hz/LSB) |
+| `0x0001` | `IREG_VFD_CURR` | ÷10 → A | Corriente de salida del variador (raw ABB: 0.1 A/LSB) |
+
+Actualizado cada 2 s desde el variador vía Modbus master. Valor 0 si el variador no responde.
 
 ---
 
@@ -353,9 +378,12 @@ Los pines del SX1262 y el OLED son los mismos en ambas placas:
 
 | Señal | Pin GPIO | Notas |
 |---|---|---|
-| RS485 RX | 47 | UART1 |
-| RS485 TX | 48 | UART1 |
-| RS485 DE/RE | 45 | HIGH=TX, LOW=RX |
+| RS485 #1 RX | 47 | UART1 — Agrónic 2500 |
+| RS485 #1 TX | 48 | UART1 — Agrónic 2500 |
+| RS485 #1 DE/RE | 45 | HIGH=TX, LOW=RX |
+| RS485 #2 RX | 20 | UART2 — VFD ABB ACQ80 |
+| RS485 #2 TX | 19 | UART2 — VFD ABB ACQ80 |
+| RS485 #2 DE/RE | 15 | HIGH=TX, LOW=RX |
 | Botón PRG | 0 | INPUT_PULLUP (LOW=pulsado) |
 
 ### Pines exclusivos del Nodo Sector
