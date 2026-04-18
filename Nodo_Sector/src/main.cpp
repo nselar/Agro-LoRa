@@ -65,12 +65,7 @@
 #define MAC_LEN      4      // HMAC-SHA256 truncado a 4 bytes
 #define MAX_PKT_LEN  12
 
-// Clave compartida – DEBE ser idéntica en gateway y nodo
-// IMPORTANTE: cambiar antes del despliegue en campo
-static const uint8_t HMAC_KEY[HMAC_KEY_LEN] = {
-  /* HMAC key removed — see secrets.h.example */
-  /* HMAC key removed */
-};
+#include "secrets.h"  // HMAC_KEY — ignorado por git, ver secrets.h.example
 
 // ==========================================
 // 4. ESTRUCTURAS DE PAQUETES

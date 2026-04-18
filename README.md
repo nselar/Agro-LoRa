@@ -6,6 +6,7 @@
 [![Framework](https://img.shields.io/badge/framework-PlatformIO%20%2F%20Arduino-orange)](https://platformio.org/)
 [![Radio](https://img.shields.io/badge/radio-LoRa%20868%20MHz-green)](https://www.semtech.com/products/wireless-rf/lora-connect/sx1262)
 [![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
+[![Build](https://github.com/nselar/Agro-LoRa/actions/workflows/build.yml/badge.svg)](https://github.com/nselar/Agro-LoRa/actions/workflows/build.yml)
 
 ---
 
@@ -13,38 +14,54 @@
 
 Agro-LoRa resuelve el problema del cableado en sistemas de riego distribuidos. En lugar de tender cables desde el cuadro de control hasta cada electroválvula (costoso, frágil y difícil de mantener), este sistema transmite las órdenes de apertura y cierre por radio LoRa.
 
+El proyecto soporta **dos cuadros de control independientes**, cada uno con su propio gateway ESP32, programador Agrónic y variador de frecuencia.
+
 ```
- ┌─────────────────────────────────┐          Radio LoRa 868 MHz
- │  Programador Agrónic 2500       │          Hasta ~2 km campo abierto
+ ══════════════════════════════════════════════════════════════
+  CUADRO 1 — Variador ABB ACQ80-04      (Nodo_Caseta)
+ ══════════════════════════════════════════════════════════════
+
+ ┌─────────────────────────────────┐
+ │  Programador Agrónic 2500       │
  │  (Master Modbus RS485)          │
  └──────────────┬──────────────────┘
-                │ Modbus RTU 9600 baud
+                │ Modbus RTU 9600 baud (Serial1)
                 ▼
  ┌──────────────────────────────────┐
- │  NODO CASETA (Gateway)           │
- │  Heltec WiFi LoRa 32 V3          │  )))  ──────────────────────── (((
- │  • Modbus Slave ID=1             │              LoRa SF9
- │  • Registro dinámico de nodos    │
- │  • HMAC-SHA256 + anti-replay     │
- │  • Modbus Master → VFD (RS485)   │
- └──────────────────────────────────┘
-          │
-          │ Modbus RTU 9600 baud (RS485)
-          ▼
+ │  NODO CASETA — Gateway ABB       │  )))  ───── LoRa SF9 ───── (((
+ │  Heltec WiFi LoRa 32 V3          │
+ │  • Modbus Slave → Agrónic        │         ▼              ▼
+ │  • Modbus Master → VFD (Serial2) │  ┌──────────────┐  ┌──────────────┐
+ └──────────────┬───────────────────┘  │ NODO SECTOR  │  │ NODO SECTOR  │
+                │ Modbus RTU (RS485)    │    #1        │  │    #2 …8     │
+                ▼                      └──────────────┘  └──────────────┘
  ┌──────────────────────────────────┐
  │  VFD ABB ACQ80-04                │
- │  (Variador de Frecuencia)        │
  │  Estado leído cada 2 s           │
  └──────────────────────────────────┘
-          │                    │
-          ▼                    ▼
- ┌─────────────────┐  ┌─────────────────┐
- │ NODO SECTOR #1  │  │ NODO SECTOR #2  │   (hasta 8 nodos)
- │ Heltec V3       │  │ Heltec V3       │
- │ DRV8833 + 9V    │  │ DRV8833 + 9V    │
- │ 2× Válv. Baccara│  │ 2× Válv. Baccara│
- │ Deep sleep 30s  │  │ Deep sleep 30s  │
- └─────────────────┘  └─────────────────┘
+
+ ══════════════════════════════════════════════════════════════
+  CUADRO 2 — Variador Vacon 100X     (Nodo_Caseta_Vacon)
+ ══════════════════════════════════════════════════════════════
+
+ ┌─────────────────────────────────┐
+ │  Programador Agrónic 2500       │
+ │  (Master Modbus RS485)          │
+ └──────────────┬──────────────────┘
+                │ Modbus RTU 9600 baud (Serial1)
+                ▼
+ ┌──────────────────────────────────┐
+ │  NODO CASETA — Gateway Vacon     │  )))  ───── LoRa SF9 ───── (((
+ │  Heltec WiFi LoRa 32 V3          │
+ │  • Modbus Slave → Agrónic        │         ▼              ▼
+ │  • Modbus Master → VFD (Serial2) │  ┌──────────────┐  ┌──────────────┐
+ └──────────────┬───────────────────┘  │ NODO SECTOR  │  │ NODO SECTOR  │
+                │ Modbus RTU (RS485)    │    #1        │  │    #2 …8     │
+                ▼                      └──────────────┘  └──────────────┘
+ ┌──────────────────────────────────┐
+ │  VFD Vacon 100X                  │
+ │  Estado leído cada 2 s           │
+ └──────────────────────────────────┘
 ```
 
 ---
@@ -60,20 +77,35 @@ Agro-LoRa resuelve el problema del cableado en sistemas de riego distribuidos. E
 - **OLED en ambos nodos** para monitoreo local sin necesidad de ordenador.
 - **Watchdog** en nodos de campo: reset automático si el firmware se cuelga más de 10 s.
 - **Detección de resets anormales**: el nodo reporta al gateway cualquier pánico, watchdog o brownout.
-- **Monitorización de variador ABB ACQ80-04**: el gateway actúa también como Modbus master sobre un segundo bus RS485 y lee estado (RUN/STOP/FALLO), frecuencia y corriente del variador cada 2 s, exponiéndolo al Agrónic como Discrete Inputs e Input Registers.
+- **Monitorización de variador de frecuencia**: el gateway actúa también como Modbus master sobre un segundo bus RS485 y lee estado (RUN/STOP/FALLO), frecuencia y corriente del variador cada 2 s, exponiéndolo al Agrónic como Discrete Inputs e Input Registers. Soporta **ABB ACQ80-04** (`Nodo_Caseta`) y **Vacon 100X** (`Nodo_Caseta_Vacon`) como firmwares independientes.
+- **Clave HMAC fuera del repositorio**: `secrets.h` está en `.gitignore`; cada instalación usa su propia clave sin riesgo de publicarla accidentalmente.
+- **CI con GitHub Actions**: cada push/PR compila los tres proyectos automáticamente.
 
 ---
 
 ## Hardware
 
-### Nodo Caseta (Gateway) — 1 unidad
+### Nodo Caseta — Gateway ABB (`Nodo_Caseta`) — Cuadro 1
 
 | Componente | Modelo | Función |
 |---|---|---|
 | Microcontrolador | Heltec WiFi LoRa 32 V3 | ESP32-S3 + SX1262 integrados |
 | Transceptor LoRa | SX1262 (integrado) | 868 MHz, hasta 22 dBm |
 | Interfaz RS485 #1 | MAX3485 o similar | Modbus RTU esclavo → Agrónic 2500 (Serial1, pines 47/48/45) |
-| Interfaz RS485 #2 | MAX3485 o similar | Modbus RTU master → VFD ABB ACQ80 (Serial2, pines 19/20/15) |
+| Interfaz RS485 #2 | MAX3485 o similar | Modbus RTU master → ABB ACQ80-04 (Serial2, pines 19/20/15) |
+| Display OLED | SSD1306 128×64 (integrado) | Estado del sistema |
+| Alimentación | 5V DC | Vía USB-C o regulador externo |
+
+### Nodo Caseta — Gateway Vacon (`Nodo_Caseta_Vacon`) — Cuadro 2
+
+Hardware idéntico al Gateway ABB. Solo difiere el firmware.
+
+| Componente | Modelo | Función |
+|---|---|---|
+| Microcontrolador | Heltec WiFi LoRa 32 V3 | ESP32-S3 + SX1262 integrados |
+| Transceptor LoRa | SX1262 (integrado) | 868 MHz, hasta 22 dBm |
+| Interfaz RS485 #1 | MAX3485 o similar | Modbus RTU esclavo → Agrónic 2500 (Serial1, pines 47/48/45) |
+| Interfaz RS485 #2 | MAX3485 o similar | Modbus RTU master → Vacon 100X (Serial2, pines 19/20/15) |
 | Display OLED | SSD1306 128×64 (integrado) | Estado del sistema |
 | Alimentación | 5V DC | Vía USB-C o regulador externo |
 
@@ -100,6 +132,12 @@ Agro-LoRa resuelve el problema del cableado en sistemas de riego distribuidos. E
 - [PlatformIO](https://platformio.org/) (extensión VS Code recomendada)
 - Python 3.x (incluido con PlatformIO)
 
+### Integración continua (GitHub Actions)
+
+En cada `push` o `pull_request`, el workflow `.github/workflows/build.yml` compila los tres proyectos automáticamente. El badge de estado aparece en la cabecera de este README.
+
+Si el build falla, el PR no debe fusionarse hasta corregirlo.
+
 ### Librerías (se instalan automáticamente con PlatformIO)
 
 | Librería | Versión | Uso |
@@ -123,29 +161,49 @@ git clone https://github.com/nselar/Agro-LoRa.git
 cd Agro-LoRa
 ```
 
-### 2. Cambiar la clave HMAC (obligatorio antes del despliegue)
+### 2. Crear el archivo de clave HMAC (obligatorio antes del despliegue)
 
-Edita la misma clave en **ambos** archivos fuente antes de flashear:
+La clave **no está en el repositorio** — cada instalador genera la suya propia.
 
-- `Nodo_Caseta/src/main.cpp` → línea con `HMAC_KEY`
-- `Nodo_Sector/src/main.cpp` → línea con `HMAC_KEY`
+```bash
+# Genera 16 bytes aleatorios
+openssl rand -hex 16
+# Ejemplo de salida: a3f82c1d9e4b7056f1c23a8d0e5b9472
+```
+
+Crea `secrets.h` a partir del ejemplo en **cada** proyecto:
+
+```bash
+cp Nodo_Caseta/src/secrets.h.example       Nodo_Caseta/src/secrets.h
+cp Nodo_Caseta_Vacon/src/secrets.h.example Nodo_Caseta_Vacon/src/secrets.h
+cp Nodo_Sector/src/secrets.h.example       Nodo_Sector/src/secrets.h
+```
+
+Edita cada `secrets.h` con los mismos bytes generados:
 
 ```c
-// Cambia estos valores por una clave aleatoria de 16 bytes
-static const uint8_t HMAC_KEY[HMAC_KEY_LEN] = {
-  0xXX, 0xXX, 0xXX, 0xXX, 0xXX, 0xXX, 0xXX, 0xXX,
-  0xXX, 0xXX, 0xXX, 0xXX, 0xXX, 0xXX, 0xXX, 0xXX
+static const uint8_t HMAC_KEY[16] = {
+  0xA3, 0xF8, 0x2C, 0x1D, 0x9E, 0x4B, 0x70, 0x56,
+  0xF1, 0xC2, 0x3A, 0x8D, 0x0E, 0x5B, 0x94, 0x72
 };
 ```
 
-> **Advertencia de seguridad**: El firmware de ejemplo incluye una clave de demostración. Cualquier instalación en campo debe usar una clave única y privada. La clave debe ser idéntica en el gateway y en todos los nodos de campo.
+> **Advertencia de seguridad**: `secrets.h` está en `.gitignore` y **nunca** se sube al repositorio. La clave debe ser idéntica en los tres firmwares (Nodo_Caseta, Nodo_Caseta_Vacon, Nodo_Sector) del mismo sistema. Un nodo con clave incorrecta no podrá comunicarse.
 
-### 3. Flashear el Nodo Caseta (Gateway)
+### 3. Flashear el Gateway
 
+**Cuadro 1 — ABB ACQ80-04:**
 ```bash
 cd Nodo_Caseta
 pio run --target upload
 pio device monitor   # Ver logs por puerto serie
+```
+
+**Cuadro 2 — Vacon 100X:**
+```bash
+cd Nodo_Caseta_Vacon
+pio run --target upload
+pio device monitor
 ```
 
 ### 4. Flashear los Nodos de Campo
@@ -178,17 +236,26 @@ Desde la consola del gateway puedes ver el proceso en tiempo real:
 
 ## Configuración
 
-### Parámetros del Nodo Caseta
+### Parámetros del Nodo Caseta — Gateway ABB (`Nodo_Caseta`)
 
-| Parámetro | Archivo | Valor por defecto | Descripción |
-|---|---|---|---|
-| `SLAVE_ID` | `Nodo_Caseta/src/main.cpp` | `1` | ID Modbus del gateway (debe coincidir con Agrónic) |
-| `MAX_RETRIES` | `Nodo_Caseta/src/main.cpp` | `3` | Reintentos de comando LoRa |
-| `ACK_TIMEOUT_MS` | `Nodo_Caseta/src/main.cpp` | `4000` | Timeout de espera de ACK (ms) |
-| `HEARTBEAT_TIMEOUT_MS` | `Nodo_Caseta/src/main.cpp` | `720000` | Tiempo sin heartbeat para considerar nodo caído (12 min) |
-| `MAX_NODES` | `Nodo_Caseta/src/main.cpp` | `8` | Máximo de nodos de campo |
-| `VFD_SLAVE_ID` | `Nodo_Caseta/src/main.cpp` | `1` | ID Modbus del variador ABB |
-| `VFD_BAUD` | `Nodo_Caseta/src/main.cpp` | `9600` | Baud rate bus RS485 del variador |
+| Parámetro | Valor por defecto | Descripción |
+|---|---|---|
+| `SLAVE_ID` | `1` | ID Modbus del gateway (debe coincidir con Agrónic) |
+| `MAX_RETRIES` | `3` | Reintentos de comando LoRa |
+| `ACK_TIMEOUT_MS` | `4000` | Timeout de espera de ACK (ms) |
+| `HEARTBEAT_TIMEOUT_MS` | `720000` | Tiempo sin heartbeat para considerar nodo caído (12 min) |
+| `MAX_NODES` | `8` | Máximo de nodos de campo |
+| `VFD_SLAVE_ID` | `1` | ID Modbus del ABB ACQ80 (parámetro 58.03 en el drive) |
+| `VFD_BAUD` | `9600` | Baud rate RS485 hacia el ABB (parámetro 58.01 en el drive) |
+
+### Parámetros del Nodo Caseta — Gateway Vacon (`Nodo_Caseta_Vacon`)
+
+Mismos parámetros de red/LoRa que el gateway ABB. Solo difieren los del variador:
+
+| Parámetro | Valor por defecto | Descripción |
+|---|---|---|
+| `VFD_SLAVE_ID` | `1` | ID Modbus del Vacon 100X (parámetro P3.1 en el drive) |
+| `VFD_BAUD` | `9600` | Baud rate RS485 hacia el Vacon (parámetro P3.2 en el drive) |
 
 ### Parámetros del Nodo Sector
 
@@ -214,17 +281,27 @@ Verifica en la documentación de tu Agrónic los parámetros de comunicación:
 
 ## Nodos
 
-### Nodo Caseta (Gateway)
+### Nodo Caseta (Gateway) — ambas variantes
 
 Actúa de puente entre el programador Agrónic y los nodos de campo.
 
-**Funciones:**
+**Funciones comunes:**
 - Esclavo Modbus RTU que el Agrónic puede leer y escribir.
 - Recibe órdenes de válvula vía Coils Modbus y las transmite por LoRa.
 - Mantiene una tabla de registro de nodos (chipId → ID) persistida en NVS.
 - Monitorea la salud de cada nodo vía heartbeats y expone el estado como Discrete Inputs.
-- Master Modbus RTU hacia el variador ABB ACQ80-04: lee estado, frecuencia y corriente cada 2 s y los publica al Agrónic vía FC02 (Discrete Inputs) y FC04 (Input Registers).
+- Master Modbus RTU hacia el variador: lee estado, frecuencia y corriente cada 2 s y los publica al Agrónic vía FC02 (Discrete Inputs) y FC04 (Input Registers).
 - Botón físico (PRG, pin 0) para alternar manualmente la válvula 1.
+
+**Diferencias entre variantes:**
+
+| | `Nodo_Caseta` | `Nodo_Caseta_Vacon` |
+|---|---|---|
+| Variador | ABB ACQ80-04 | Vacon 100X |
+| SW bit RUN | bit 2 | bit 1 |
+| SW bit FAULT | bit 3 | bit 2 |
+| Config drive | Param 58.01–58.04 | Param P3.1–P3.4 |
+| Display OLED | `VFD:RUN/STOP FLT` | `VCN:RUN/STOP FLT` |
 
 **Comandos por terminal serie (115200 baud):**
 
@@ -339,8 +416,8 @@ El Agrónic escribe el coil. El gateway detecta el cambio, envía el comando LoR
 | `0x0001` | `ISTS_NODE2_ALIVE` | 1=nodo 2 activo |
 | `0x0002` | `ISTS_NODE1_FAULT` | 1=fallo activo en nodo 1 |
 | `0x0003` | `ISTS_NODE2_FAULT` | 1=fallo activo en nodo 2 |
-| `0x0004` | `ISTS_VFD_RUNNING` | 1=variador en marcha (bit2 de Status Word ABB) |
-| `0x0005` | `ISTS_VFD_FAULT` | 1=fallo/trip activo en el variador (bit3 de Status Word ABB) |
+| `0x0004` | `ISTS_VFD_RUNNING` | 1=variador en marcha |
+| `0x0005` | `ISTS_VFD_FAULT` | 1=fallo/trip activo en el variador |
 
 El Agrónic puede leer estas entradas para disparar alarmas o detener el programa de riego.
 
@@ -348,10 +425,12 @@ El Agrónic puede leer estas entradas para disparar alarmas o detener el program
 
 | Dirección | Nombre | Escala | Descripción |
 |---|---|---|---|
-| `0x0000` | `IREG_VFD_FREQ` | ÷100 → Hz | Frecuencia de salida del variador (raw ABB: 0.01 Hz/LSB) |
-| `0x0001` | `IREG_VFD_CURR` | ÷10 → A | Corriente de salida del variador (raw ABB: 0.1 A/LSB) |
+| `0x0000` | `IREG_VFD_FREQ` | ÷100 → Hz | Frecuencia de salida del variador (0.01 Hz/LSB) |
+| `0x0001` | `IREG_VFD_CURR` | ÷10 → A | Corriente de salida del variador (0.1 A/LSB) |
 
 Actualizado cada 2 s desde el variador vía Modbus master. Valor 0 si el variador no responde.
+
+> **Nota**: El mapa de registros Modbus expuesto al Agrónic es **idéntico** en ambas variantes de firmware (ABB y Vacon). La diferencia está en cómo cada firmware interpreta internamente el Status Word del drive (ABB: bit2=RUN, bit3=FAULT; Vacon: bit1=RUN, bit2=FAULT).
 
 ---
 
@@ -374,15 +453,15 @@ Los pines del SX1262 y el OLED son los mismos en ambas placas:
 | OLED SCL | 18 | |
 | OLED RST | 21 | |
 
-### Pines exclusivos del Nodo Caseta
+### Pines exclusivos del Nodo Caseta (ambas variantes — ABB y Vacon)
 
 | Señal | Pin GPIO | Notas |
 |---|---|---|
 | RS485 #1 RX | 47 | UART1 — Agrónic 2500 |
 | RS485 #1 TX | 48 | UART1 — Agrónic 2500 |
 | RS485 #1 DE/RE | 45 | HIGH=TX, LOW=RX |
-| RS485 #2 RX | 20 | UART2 — VFD ABB ACQ80 |
-| RS485 #2 TX | 19 | UART2 — VFD ABB ACQ80 |
+| RS485 #2 RX | 20 | UART2 — Variador (ABB ACQ80 o Vacon 100X) |
+| RS485 #2 TX | 19 | UART2 — Variador (ABB ACQ80 o Vacon 100X) |
 | RS485 #2 DE/RE | 15 | HIGH=TX, LOW=RX |
 | Botón PRG | 0 | INPUT_PULLUP (LOW=pulsado) |
 
@@ -411,13 +490,17 @@ La clave compartida (`HMAC_KEY`, 16 bytes) debe estar previamente programada en 
 
 Cada paquete de comando lleva un `messageId` monótonamente creciente, persistido en NVS (el gateway) y en RTC memory (el nodo de campo, sobrevive deep sleep). Un paquete con `messageId ≤ lastMessageId` se descarta.
 
-### Cambiar la clave antes del despliegue
+### Gestión de la clave (secrets.h)
 
-1. Genera 16 bytes aleatorios (por ejemplo con `openssl rand -hex 16`).
-2. Edita `HMAC_KEY` en `Nodo_Caseta/src/main.cpp` y `Nodo_Sector/src/main.cpp` con los mismos valores.
-3. Recompila y flashea todos los dispositivos.
+La clave HMAC vive en `src/secrets.h`, excluido de git via `.gitignore`. El repositorio incluye `secrets.h.example` con clave nula como plantilla.
 
-Si la clave de un nodo de campo no coincide con la del gateway, sus paquetes serán silenciosamente descartados.
+**Flujo para nueva instalación:**
+1. `openssl rand -hex 16` → genera 16 bytes únicos.
+2. Copia `secrets.h.example` → `secrets.h` en los tres proyectos.
+3. Rellena los bytes en cada `secrets.h` con los mismos valores.
+4. Recompila y flashea todos los dispositivos.
+
+**Nunca** commitear `secrets.h`. Si la clave de un nodo no coincide con la del gateway, sus paquetes serán silenciosamente descartados.
 
 ---
 
@@ -425,13 +508,26 @@ Si la clave de un nodo de campo no coincide con la del gateway, sus paquetes ser
 
 ```
 Agro-LoRa/
-├── Nodo_Caseta/               # Firmware del gateway
+├── .github/
+│   └── workflows/
+│       └── build.yml          # CI: compila los tres proyectos en cada push/PR
+├── Nodo_Caseta/               # Gateway Cuadro 1 — variador ABB ACQ80-04
 │   ├── src/
-│   │   └── main.cpp
+│   │   ├── main.cpp
+│   │   ├── secrets.h          # ← NO en git (.gitignore). Crear desde el ejemplo
+│   │   └── secrets.h.example  # Plantilla de clave (clave nula, sin datos reales)
 │   └── platformio.ini
-├── Nodo_Sector/               # Firmware del nodo de campo (todos los nodos usan el mismo)
+├── Nodo_Caseta_Vacon/         # Gateway Cuadro 2 — variador Vacon 100X
 │   ├── src/
-│   │   └── main.cpp
+│   │   ├── main.cpp
+│   │   ├── secrets.h          # ← NO en git
+│   │   └── secrets.h.example
+│   └── platformio.ini
+├── Nodo_Sector/               # Firmware nodo de campo (mismo binario para todos los nodos)
+│   ├── src/
+│   │   ├── main.cpp
+│   │   ├── secrets.h          # ← NO en git
+│   │   └── secrets.h.example
 │   └── platformio.ini
 └── README.md
 ```

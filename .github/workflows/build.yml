@@ -1,0 +1,38 @@
+name: PlatformIO Build
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        project: [Nodo_Caseta, Nodo_Caseta_Vacon, Nodo_Sector]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: ${{ runner.os }}-pio-${{ matrix.project }}-${{ hashFiles(format('{0}/platformio.ini', matrix.project)) }}
+          restore-keys: |
+            ${{ runner.os }}-pio-${{ matrix.project }}-
+            ${{ runner.os }}-pio-
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Create secrets.h from example
+        run: cp ${{ matrix.project }}/src/secrets.h.example ${{ matrix.project }}/src/secrets.h
+
+      - name: Build ${{ matrix.project }}
+        run: cd ${{ matrix.project }} && pio run

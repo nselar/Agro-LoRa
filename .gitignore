@@ -1,3 +1,6 @@
+# Clave HMAC — nunca subir al repositorio
+**/src/secrets.h
+
 # PlatformIO — build artifacts y librerías descargadas
 **/.pio/
 
