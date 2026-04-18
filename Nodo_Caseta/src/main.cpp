@@ -588,7 +588,7 @@ void loop() {
   if (!vfdPollPending && millis() - lastVfdPoll > 2000) {
     lastVfdPoll    = millis();
     vfdPollPending = true;
-    vfd.readHregs(VFD_SLAVE_ID, VFD_REG_SW, 3, vfdRawData, vfdReadCb);
+    vfd.readHreg(VFD_SLAVE_ID, VFD_REG_SW, vfdRawData, 3, vfdReadCb);
   }
 
   // 2. RECEPCIÓN LORA: heartbeats, ACKs y solicitudes de registro
