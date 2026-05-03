@@ -1,3 +1,26 @@
+// =============================================================================
+// GATEWAY CASETA — Agrónic IoT  v2.0
+// Hardware: Heltec WiFi LoRa 32 V3 (ESP32-S3 dual-core)
+//
+// ARQUITECTURA FREERTOS:
+//   Core 1 (alta prioridad) — taskRealTime:
+//     · Lectura optoacopladores DST-1R8P (sectores Agrónic)
+//     · TX/RX LoRa Star P2P (comandos, ACK, JOIN, heartbeat)
+//     · Gestión botón PRG (corto = ciclar pantalla, largo = menú manual)
+//     · Cola de comandos FIFO
+//   Core 0 (baja prioridad) — taskConnectivity:
+//     · WiFi + Blynk
+//     · Modbus RTU master VFD ABB ACQ80
+//     · Push telemetría periódico
+//   Core 0 (baja prioridad) — taskDisplay:
+//     · OLED: 4 pantallas + menú control manual
+//     · Auto-encendido cuando hay riego activo
+//     · Carousel para contenido largo
+//
+// OPTOACOPLADOR DST-1R8P (NPN): LOW = sector activo
+// VCC-OUT del DST-1R8P → pin 3V3 del ESP32
+// =============================================================================
+
 #include <Arduino.h>
 #include <RadioLib.h>
 #include <ModbusRTU.h>
@@ -6,11 +29,17 @@
 #include <Adafruit_SSD1306.h>
 #include <Preferences.h>
 #include <mbedtls/md.h>
+#include <WiFi.h>
+#include <BlynkSimpleEsp32.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
+#include "secrets.h"
 
-// ==========================================
-// 1. PINES (Heltec WiFi LoRa 32 V3)
-// ==========================================
-// SX1262
+// ============================================================
+// 1. PINES
+// ============================================================
 #define LORA_NSS    8
 #define LORA_DIO1   14
 #define LORA_NRST   12
@@ -19,684 +48,791 @@
 #define LORA_MISO   11
 #define LORA_MOSI   10
 
-// OLED SSD1306
 #define OLED_SDA    17
 #define OLED_SCL    18
 #define OLED_RST    21
-#define SCREEN_WIDTH  128
-#define SCREEN_HEIGHT 64
+#define SCREEN_W    128
+#define SCREEN_H    64
 
-// RS485 (MAX3485) – UART1
-#define RX_PIN      47
-#define TX_PIN      48
-#define DE_RE_PIN   45   // HIGH=TX, LOW=RX
+// Optoacoplador DST-1R8P — sectores 4-8 del Agrónic
+#define OPTO_S4  2
+#define OPTO_S5  3
+#define OPTO_S6  4
+#define OPTO_S7  5
+#define OPTO_S8  6
 
-// Botón de usuario (PRG)
+#define NUM_SECTORS  5
+#define DEBOUNCE_MS  100
+
+// RS485 MAX3485 → VFD ABB ACQ80
+#define VFD_RX   47
+#define VFD_TX   48
+#define VFD_DE   45
+
 #define BUTTON_PIN  0
 
-// ==========================================
-// 2. SEGURIDAD – PROTOCOLO Y CLAVES
-// ==========================================
-#define PKT_COMMAND  0xA1   // Gateway → Nodo: comando de válvula
-#define PKT_STATUS   0xB2   // Nodo → Gateway: ACK / heartbeat / reset
-#define PKT_JOIN     0xC3   // Nodo → Gateway: solicitud de registro
-#define PKT_REGISTER 0xD4   // Gateway → Nodo: ID asignado
+// ============================================================
+// 2. MAPEO SECTOR → NODO LORA
+// ============================================================
+struct SectorMap { uint8_t gpio; uint8_t loraNode; uint8_t loraValve; };
 
-#define HMAC_KEY_LEN 16
-#define MAC_LEN      4      // HMAC-SHA256 truncado a 4 bytes
-#define MAX_PKT_LEN  12     // Tamaño del paquete más grande (LoRaPacket)
-
-#include "secrets.h"  // HMAC_KEY — ignorado por git, ver secrets.h.example
-
-// ==========================================
-// 3. ESTRUCTURAS DE PAQUETES
-// ==========================================
-
-// Gateway → Nodo (12 bytes)
-struct __attribute__((packed)) LoRaPacket {
-  uint8_t  pktType;       // PKT_COMMAND (0xA1)
-  uint8_t  targetNode;    // ID del nodo destino
-  uint8_t  valve;         // 1 o 2 (canal del DRV8833)
-  uint8_t  command;       // 1=ABRIR, 2=CERRAR, 3=PING
-  uint32_t messageId;     // Contador anti-replay (persistente en NVS)
-  uint8_t  mac[MAC_LEN];  // HMAC-SHA256 truncado
+static const SectorMap SECTOR_MAP[NUM_SECTORS] = {
+  { OPTO_S4, 1, 1 },   // Sector 4 → Nodo 1 V-A
+  { OPTO_S5, 1, 2 },   // Sector 5 → Nodo 1 V-B
+  { OPTO_S6, 2, 1 },   // Sector 6 → Nodo 2 V-A
+  { OPTO_S7, 2, 2 },   // Sector 7 → Nodo 2 V-B
+  { OPTO_S8, 3, 1 },   // Sector 8 → Nodo 3 V-A
 };
 
-// Nodo → Gateway (8 bytes)
-struct __attribute__((packed)) LoRaStatus {
-  uint8_t  pktType;       // PKT_STATUS (0xB2)
-  uint8_t  fromNode;      // ID del nodo emisor
-  uint8_t  type;          // 0x00=ACK, 0x01=HEARTBEAT, 0x02=BOOT_REASON
-  uint8_t  detail;        // ACK: válvula; HB: 0; BOOT: reset cause
-  uint32_t messageId;     // ACK: echo cmd ID; HB: wakeCount del nodo
+// ============================================================
+// 3. PROTOCOLO LORA
+// ============================================================
+#define PKT_COMMAND  0xA1
+#define PKT_STATUS   0xB2
+#define PKT_JOIN     0xC3
+#define PKT_REGISTER 0xD4
+
+#define HMAC_KEY_LEN   16
+#define MAC_LEN         4
+#define MAX_PKT_LEN    12
+#define MAX_RETRIES     3
+#define RETRY_MS        1000
+#define ACK_TIMEOUT_MS  4000
+
+struct __attribute__((packed)) LoRaPacket  { uint8_t t; uint8_t node; uint8_t valve; uint8_t cmd; uint32_t id; uint8_t mac[4]; };
+struct __attribute__((packed)) LoRaStatus  { uint8_t t; uint8_t from; uint8_t type; uint8_t detail; uint32_t id; };
+struct __attribute__((packed)) LoRaJoin    { uint8_t t; uint32_t chipId; uint8_t mac[4]; };
+struct __attribute__((packed)) LoRaRegister{ uint8_t t; uint32_t chipId; uint8_t assignedId; uint8_t mac[4]; };
+
+// ============================================================
+// 4. NODOS
+// ============================================================
+#define MAX_NODES  8
+#define HB_TIMEOUT_MS  (12UL * 60 * 1000)
+
+struct NodeHealth { unsigned long lastSeen; bool alive; bool fault; uint8_t resetCause; };
+NodeHealth nodes[MAX_NODES + 1];
+uint32_t   chipIdMap[MAX_NODES + 1];
+volatile uint8_t registeredCount = 0;
+
+// ============================================================
+// 5. VFD — MODBUS
+// ============================================================
+#define VFD_ID    1
+#define VFD_BAUD  9600
+#define REG_SW    2
+#define REG_FREQ  3
+#define REG_CURR  4
+
+#define VP_FREQ   V0
+#define VP_CURR   V1
+#define VP_STATUS V2
+#define VP_TEMP   V3
+#define VP_N1     V4
+#define VP_N2     V5
+#define VP_N3     V6
+
+// ============================================================
+// 6. DISPLAY — MÁQUINA DE ESTADOS
+// ============================================================
+enum DisplayPage {
+  PAGE_NODES = 0,   // Pantalla 1: nodos + health
+  PAGE_ALERTS,      // Pantalla 2: alertas recientes
+  PAGE_SECTORS,     // Pantalla 3: sectores en riego
+  PAGE_VFD,         // Pantalla 4: info VFD
+  PAGE_MANUAL,      // Menú control manual (desde pantalla 3 long-press)
+  PAGE_COUNT = 4    // Solo 4 páginas normales (MANUAL es overlay)
 };
 
-// Nodo → Gateway: solicitud de registro (9 bytes)
-struct __attribute__((packed)) LoRaJoin {
-  uint8_t  pktType;       // PKT_JOIN (0xC3)
-  uint32_t chipId;        // ID único del chip (ESP.getEfuseMac() & 0xFFFFFFFF)
-  uint8_t  mac[MAC_LEN];  // HMAC(pktType + chipId)
-};
+#define DISPLAY_TIMEOUT_MS  30000   // Apagar pantalla tras 30s sin actividad
+#define CAROUSEL_MS          2500   // Intervalo scroll de carrusel
+#define BTN_LONG_MS           800   // Tiempo para long-press
 
-// Gateway → Nodo: ID asignado (10 bytes)
-struct __attribute__((packed)) LoRaRegister {
-  uint8_t  pktType;       // PKT_REGISTER (0xD4)
-  uint32_t chipId;        // Echo del chipId solicitante (para que el nodo lo verifique)
-  uint8_t  assignedId;    // ID asignado: 1..MAX_NODES
-  uint8_t  mac[MAC_LEN];  // HMAC(pktType + chipId + assignedId)
-};
+// Log de alertas (circular, 5 entradas)
+#define ALERT_LOG_SIZE  5
+struct AlertEntry { char msg[32]; unsigned long ts; };
+AlertEntry alertLog[ALERT_LOG_SIZE];
+uint8_t    alertLogHead = 0;
+uint8_t    alertLogCount = 0;
 
-// ==========================================
-// 4. HEALTH MONITORING
-// ==========================================
-#define MAX_NODES            8    // Máximo de nodos soportados por la red
-// Timeout: si no hay heartbeat en 12 min, el nodo se considera caído
-// (los nodos envían heartbeat cada 5 min: 10 ciclos × 30s)
-#define HEARTBEAT_TIMEOUT_MS (12UL * 60 * 1000)
+// ============================================================
+// 7. ESTADO COMPARTIDO (protegido con SemaphoreHandle_t)
+// ============================================================
+volatile bool     sectorState[NUM_SECTORS]     = {false};
+volatile bool     prevSectorState[NUM_SECTORS] = {false};
+volatile unsigned long lastChange[NUM_SECTORS] = {0};
 
-struct NodeHealth {
-  unsigned long lastSeen;
-  bool          alive;
-  bool          fault;
-  uint8_t       lastResetCause;
-};
+uint16_t vfdRaw[3]     = {0};  // [SW, FREQ, CURR]
+bool     vfdRunning    = false;
+bool     vfdFault      = false;
+volatile bool vfdPollPending = false;
+unsigned long lastVfdPoll    = 0;
+unsigned long lastBlynkPush  = 0;
+unsigned long lastHealthPush = 0;
+unsigned long lastTimeout    = 0;
 
-NodeHealth nodes[MAX_NODES + 1];        // Índices 1..MAX_NODES; índice 0 no se usa
-uint32_t   chipIdMap[MAX_NODES + 1];    // Mapa nodeId → chipId (persistido en NVS)
-uint8_t    registeredCount = 0;         // Número de nodos actualmente registrados
+uint32_t          msgCounter = 0;
+volatile bool     gwRxFlag   = false;
 
-// ==========================================
-// 5. MODBUS
-// ==========================================
-// Agrónic 2500 actúa como MASTER; gateway como SLAVE ID=1
-#define SLAVE_ID 1
+// ============================================================
+// 8. FREERTOS — HANDLES
+// ============================================================
+QueueHandle_t     cmdQueue;
+SemaphoreHandle_t displayMutex;
+SemaphoreHandle_t radioMutex;
+SemaphoreHandle_t nodesMutex;
 
-// Coils (read/write por Agrónic)
-// TOPOLOGÍA ACTUAL: ambas válvulas en el MISMO nodo físico (nodo 1)
-// Para nodos separados: cambiar el targetNode en sendLoRaCommand()
-#define COIL_VALVE_1  0x00
-#define COIL_VALVE_2  0x01
+// ============================================================
+// 9. OBJETOS HARDWARE
+// ============================================================
+SX1262           radio = new Module(LORA_NSS, LORA_DIO1, LORA_NRST, LORA_BUSY);
+Adafruit_SSD1306 display(SCREEN_W, SCREEN_H, &Wire, OLED_RST);
+ModbusRTU        vfd;
+Preferences      prefs;
 
-// Discrete Inputs (solo lectura por Agrónic – estado de salud de nodos)
-#define ISTS_NODE1_ALIVE  0x00
-#define ISTS_NODE2_ALIVE  0x01
-#define ISTS_NODE1_FAULT  0x02
-#define ISTS_NODE2_FAULT  0x03
+// ============================================================
+// 10. ISR LORA
+// ============================================================
+IRAM_ATTR void gwSetFlag() { gwRxFlag = true; }
 
-// Discrete Inputs – estado VFD (solo lectura por Agrónic)
-#define ISTS_VFD_RUNNING  0x04   // 1 = variador en marcha
-#define ISTS_VFD_FAULT    0x05   // 1 = variador en fallo/trip
-
-// Input Registers – medidas VFD (solo lectura por Agrónic, FC04)
-#define IREG_VFD_FREQ     0x00   // Frecuencia real (0.01 Hz; ej: 5000 = 50.00 Hz)
-#define IREG_VFD_CURR     0x01   // Corriente motor (0.1 A;  ej: 15   = 1.5 A)
-
-// ==========================================
-// 5b. VARIADOR ABB ACQ80-04 (Modbus MASTER)
-// ==========================================
-// Serial2 → MAX3485 → bus RS485 dedicado al variador
-#define VFD_TX_PIN    19
-#define VFD_RX_PIN    20
-#define VFD_DE_PIN    15
-
-#define VFD_SLAVE_ID  1     // Parámetro 58.03 del ACQ80
-#define VFD_BAUD      9600  // Parámetro 58.01 del ACQ80
-
-// Registros Holding del ACQ80 (perfil "ABB Drives", FC03, 0-indexed)
-#define VFD_REG_SW    2     // Status Word    – bit2=RUN, bit3=FAULT
-#define VFD_REG_FREQ  3     // Output Freq    – unidad según param 46.01
-#define VFD_REG_CURR  4     // Motor Current  – unidad según param 46.02
-
-// ==========================================
-// 6. PARÁMETROS DE TRANSMISIÓN
-// ==========================================
-#define MAX_RETRIES    3
-#define RETRY_DELAY_MS 1000
-#define ACK_TIMEOUT_MS 4000
-
-// ==========================================
-// 7. OBJETOS GLOBALES
-// ==========================================
-SX1262 radio = new Module(LORA_NSS, LORA_DIO1, LORA_NRST, LORA_BUSY);
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RST);
-ModbusRTU mb;
-ModbusRTU vfd;
-Preferences prefs;
-
-uint32_t msgCounter = 0;
-bool valve1_state = false;
-bool valve2_state = false;
-unsigned long lastDisplayUpdate  = 0;
-unsigned long lastTimeoutCheck   = 0;
-
-volatile bool gwReceivedFlag = false;
-
-// Estado VFD (actualizado por callback Modbus master)
-uint16_t      vfdRawData[3]    = {0};  // [SW, FREQ, CURR]
-bool          vfdPollPending   = false;
-bool          vfdRunning       = false;
-bool          vfdFault         = false;
-unsigned long lastVfdPoll      = 0;
-
-// ==========================================
-// 8. FUNCIONES AUXILIARES
-// ==========================================
-
-// ISR: el SX1262 avisa que recibió un paquete
-IRAM_ATTR void gwSetFlag(void) {
-  gwReceivedFlag = true;
-}
-
-// --- HMAC helpers ---
-
-// HMAC para paquete de comando (Gateway → Nodo)
-void computeHMAC(const LoRaPacket* p, uint8_t out[MAC_LEN]) {
-  uint8_t full_mac[32];
-  const uint8_t payload[8] = {
-    p->pktType, p->targetNode, p->valve, p->command,
-    (uint8_t)(p->messageId),       (uint8_t)(p->messageId >> 8),
-    (uint8_t)(p->messageId >> 16), (uint8_t)(p->messageId >> 24)
-  };
+// ============================================================
+// 11. HMAC
+// ============================================================
+static void _hmac(const uint8_t* data, size_t len, uint8_t out[MAC_LEN]) {
+  uint8_t full[32];
   mbedtls_md_hmac(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256),
-                  HMAC_KEY, HMAC_KEY_LEN, payload, sizeof(payload), full_mac);
-  memcpy(out, full_mac, MAC_LEN);
+                  HMAC_KEY, HMAC_KEY_LEN, data, len, full);
+  memcpy(out, full, MAC_LEN);
+}
+void hmacPacket(const LoRaPacket* p, uint8_t out[4]) {
+  uint8_t d[8] = { p->t,p->node,p->valve,p->cmd,
+    (uint8_t)p->id,(uint8_t)(p->id>>8),(uint8_t)(p->id>>16),(uint8_t)(p->id>>24) };
+  _hmac(d, 8, out);
+}
+void hmacJoin(const LoRaJoin* j, uint8_t out[4]) {
+  uint8_t d[5] = { j->t,(uint8_t)j->chipId,(uint8_t)(j->chipId>>8),
+    (uint8_t)(j->chipId>>16),(uint8_t)(j->chipId>>24) };
+  _hmac(d, 5, out);
+}
+void hmacReg(const LoRaRegister* r, uint8_t out[4]) {
+  uint8_t d[6] = { r->t,(uint8_t)r->chipId,(uint8_t)(r->chipId>>8),
+    (uint8_t)(r->chipId>>16),(uint8_t)(r->chipId>>24),r->assignedId };
+  _hmac(d, 6, out);
+}
+bool verifyJoin(const LoRaJoin* j) {
+  uint8_t exp[4]; hmacJoin(j, exp);
+  return memcmp(exp, j->mac, 4) == 0;
 }
 
-// HMAC para paquete de JOIN (Nodo → Gateway): cubre pktType + chipId
-void computeHMACJoin(const LoRaJoin* j, uint8_t out[MAC_LEN]) {
-  uint8_t full_mac[32];
-  const uint8_t payload[5] = {
-    j->pktType,
-    (uint8_t)(j->chipId),       (uint8_t)(j->chipId >> 8),
-    (uint8_t)(j->chipId >> 16), (uint8_t)(j->chipId >> 24)
-  };
-  mbedtls_md_hmac(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256),
-                  HMAC_KEY, HMAC_KEY_LEN, payload, sizeof(payload), full_mac);
-  memcpy(out, full_mac, MAC_LEN);
+// ============================================================
+// 12. ALERTAS — LOG CIRCULAR
+// ============================================================
+void pushAlert(const char* msg) {
+  Serial.printf("[ALERTA] %s\n", msg);
+  AlertEntry& e = alertLog[alertLogHead];
+  strncpy(e.msg, msg, 31); e.msg[31] = '\0';
+  e.ts = millis();
+  alertLogHead = (alertLogHead + 1) % ALERT_LOG_SIZE;
+  if (alertLogCount < ALERT_LOG_SIZE) alertLogCount++;
+
+  if (Blynk.connected()) Blynk.logEvent("alerta", msg);
 }
 
-// HMAC para paquete de REGISTER (Gateway → Nodo): cubre pktType + chipId + assignedId
-void computeHMACRegister(const LoRaRegister* r, uint8_t out[MAC_LEN]) {
-  uint8_t full_mac[32];
-  const uint8_t payload[6] = {
-    r->pktType,
-    (uint8_t)(r->chipId),       (uint8_t)(r->chipId >> 8),
-    (uint8_t)(r->chipId >> 16), (uint8_t)(r->chipId >> 24),
-    r->assignedId
-  };
-  mbedtls_md_hmac(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256),
-                  HMAC_KEY, HMAC_KEY_LEN, payload, sizeof(payload), full_mac);
-  memcpy(out, full_mac, MAC_LEN);
+// ============================================================
+// 13. DISPLAY — SISTEMA COMPLETO
+// ============================================================
+static DisplayPage  currentPage      = PAGE_NODES;
+static bool         displayOn        = false;
+static unsigned long displayLastActivity = 0;
+static uint8_t      carouselOffset   = 0;
+static unsigned long carouselLastTick = 0;
+static bool         inManualMenu     = false;
+static uint8_t      manualCursor     = 0;   // sector seleccionado (0..NUM_SECTORS-1)
+
+// Helper: imprime línea con truncado a 21 chars (ancho pantalla a size 1)
+void dispLine(uint8_t row, const char* fmt, ...) {
+  char buf[24];
+  va_list args; va_start(args, fmt); vsnprintf(buf, sizeof(buf), fmt, args); va_end(args);
+  display.setCursor(0, row * 8);
+  display.print(buf);
 }
 
-bool verifyHMACJoin(const LoRaJoin* j) {
-  uint8_t expected[MAC_LEN];
-  computeHMACJoin(j, expected);
-  return (memcmp(expected, j->mac, MAC_LEN) == 0);
+// Devuelve true si algún sector está activo
+bool anySectorActive() {
+  for (uint8_t i = 0; i < NUM_SECTORS; i++) if (sectorState[i]) return true;
+  return false;
 }
 
-// --- Display ---
+void displayWake() {
+  displayOn = true;
+  displayLastActivity = millis();
+  display.ssd1306_command(SSD1306_DISPLAYON);
+}
 
-void updateDisplay(const String& status, const String& lastCmd) {
+void displaySleep() {
+  displayOn = false;
+  display.ssd1306_command(SSD1306_DISPLAYOFF);
+}
+
+// Pantalla 1 — Nodos y health
+void renderPageNodes() {
+  uint8_t count;
+  if (xSemaphoreTake(nodesMutex, 5) == pdTRUE) {
+    count = registeredCount;
+    xSemaphoreGive(nodesMutex);
+  } else { count = registeredCount; }
+
+  dispLine(0, "=NODOS  %d/%d=", count, MAX_NODES);
+  float espTemp = temperatureRead();
+  dispLine(1, "GW %.0fC W:%s B:%s", espTemp,
+    WiFi.isConnected() ? "Y" : "N", Blynk.connected() ? "Y" : "N");
+
+  // Hasta 6 nodos visibles; si hay más, el carrusel desplaza
+  uint8_t visible = min((uint8_t)6, count);
+  uint8_t start   = (count > 6) ? (carouselOffset % (count - 5)) : 0;
+  for (uint8_t i = 0; i < visible; i++) {
+    uint8_t n = start + i + 1;
+    if (n > count) break;
+    const char* st = !nodes[n].alive ? "CAIDO" : nodes[n].fault ? "FALLO" : "OK   ";
+    unsigned long ago = (millis() - nodes[n].lastSeen) / 1000;
+    dispLine(i + 2, "N%d %s %lus", n, st, ago);
+  }
+}
+
+// Pantalla 2 — Alertas recientes
+void renderPageAlerts() {
+  dispLine(0, "=ALERTAS  %d=", alertLogCount);
+  if (alertLogCount == 0) { dispLine(1, "(sin alertas)"); return; }
+  uint8_t visible = min((uint8_t)7, alertLogCount);
+  uint8_t start   = (alertLogCount > 7) ? (carouselOffset % (alertLogCount - 6)) : 0;
+  for (uint8_t i = 0; i < visible; i++) {
+    uint8_t idx = (alertLogHead - alertLogCount + start + i + ALERT_LOG_SIZE) % ALERT_LOG_SIZE;
+    display.setCursor(0, (i + 1) * 8);
+    char buf[22]; strncpy(buf, alertLog[idx].msg, 21); buf[21] = '\0';
+    display.print(buf);
+  }
+}
+
+// Pantalla 3 — Sectores en riego
+void renderPageSectors() {
+  dispLine(0, "=SECTORES=");
+  for (uint8_t i = 0; i < NUM_SECTORS; i++) {
+    dispLine(i + 1, "S%d->N%dV%d %s", i + 4,
+      SECTOR_MAP[i].loraNode, SECTOR_MAP[i].loraValve,
+      sectorState[i] ? "RIEGO " : "parado");
+  }
+  dispLine(6, "");
+  dispLine(7, "[MANT]=prg largo");
+}
+
+// Pantalla 4 — VFD info
+void renderPageVfd() {
+  dispLine(0, "=VFD ABB ACQ80=");
+  dispLine(1, "Estado: %s%s", vfdRunning ? "RUN" : "STOP", vfdFault ? " FALLO" : "");
+  dispLine(2, "Freq:  %.2f Hz", vfdRaw[1] / 100.0f);
+  dispLine(3, "Corr:  %.1f A",  vfdRaw[2] / 10.0f);
+  dispLine(4, "VFD ID:%d", VFD_ID);
+  dispLine(5, "Poll: 5s");
+}
+
+// Menú control manual — overlay
+void renderMenuManual() {
+  dispLine(0, "=CONTROL MANUAL=");
+  for (uint8_t i = 0; i < NUM_SECTORS; i++) {
+    char arrow = (i == manualCursor) ? '>' : ' ';
+    dispLine(i + 1, "%cS%d %s", arrow, i + 4, sectorState[i] ? "ABIERTO" : "cerrado");
+  }
+  dispLine(6, "");
+  dispLine(7, "PRG=mover LNG=act");
+}
+
+// Función principal de render — llamada desde taskDisplay
+void renderDisplay() {
+  if (!displayOn) return;
+
+  if (xSemaphoreTake(displayMutex, portMAX_DELAY) != pdTRUE) return;
+
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
 
-  display.setCursor(0, 0);
-  display.printf("GATEWAY  Reg:%d/%d", registeredCount, MAX_NODES);
-
-  // Estado válvulas y salud de los dos primeros nodos
-  display.setCursor(0, 12);
-  display.printf("V1:%s%s  V2:%s%s",
-    valve1_state ? "ABT" : "CRR",
-    (registeredCount >= 1 && nodes[1].fault) ? "!" : " ",
-    valve2_state ? "ABT" : "CRR",
-    (registeredCount >= 2 && nodes[2].fault) ? "!" : " ");
-
-  display.setCursor(0, 24);
-  display.printf("N1:%s  N2:%s",
-    (registeredCount >= 1) ? (nodes[1].alive ? "OK " : "OFF") : "---",
-    (registeredCount >= 2) ? (nodes[2].alive ? "OK " : "OFF") : "---");
-
-  display.setCursor(0, 36);
-  display.printf("VFD:%s%s",
-    vfdRunning ? "RUN " : "STOP",
-    vfdFault   ? " FLT" : "    ");
-
-  display.setCursor(0, 48);
-  display.print(status);
-
-  display.setCursor(0, 56);
-  display.print(lastCmd);
+  if (inManualMenu) {
+    renderMenuManual();
+  } else {
+    switch (currentPage) {
+      case PAGE_NODES:   renderPageNodes();   break;
+      case PAGE_ALERTS:  renderPageAlerts();  break;
+      case PAGE_SECTORS: renderPageSectors(); break;
+      case PAGE_VFD:     renderPageVfd();     break;
+      default: break;
+    }
+  }
 
   display.display();
+  xSemaphoreGive(displayMutex);
 }
 
-// Sincroniza el estado de salud de nodos con los Discrete Inputs Modbus
-void updateModbusHealth() {
-  mb.Ists(ISTS_NODE1_ALIVE, (registeredCount >= 1) ? nodes[1].alive : false);
-  mb.Ists(ISTS_NODE2_ALIVE, (registeredCount >= 2) ? nodes[2].alive : false);
-  mb.Ists(ISTS_NODE1_FAULT, (registeredCount >= 1) ? nodes[1].fault : false);
-  mb.Ists(ISTS_NODE2_FAULT, (registeredCount >= 2) ? nodes[2].fault : false);
-}
+// ============================================================
+// 14. LÓGICA BOTÓN PRG
+// ============================================================
+// Llamada desde taskRealTime — no bloqueante
+struct BtnState {
+  bool     pressed;
+  bool     longFired;
+  unsigned long pressStart;
+};
+BtnState btn = {false, false, 0};
 
-// Callback Modbus master: se llama cuando llega la respuesta del variador
-bool vfdReadCb(Modbus::ResultCode event, uint16_t transactionId, void* data) {
-  vfdPollPending = false;
-  if (event != Modbus::EX_SUCCESS) {
-    Serial.printf("[VFD] Error lectura Modbus: %d\n", event);
-    return true;
+// Enqueue externo (definido adelante)
+struct CmdItem { uint8_t node; uint8_t valve; uint8_t cmd; };
+extern QueueHandle_t cmdQueue;
+
+void btnShortPress() {
+  displayWake();
+  displayLastActivity = millis();
+
+  if (inManualMenu) {
+    // Avanzar cursor en el menú
+    manualCursor = (manualCursor + 1) % NUM_SECTORS;
+    return;
   }
-  uint16_t sw   = vfdRawData[0];
-  uint16_t freq = vfdRawData[1];
-  uint16_t curr = vfdRawData[2];
-
-  vfdRunning = (sw >> 2) & 0x01;  // Status Word bit 2 = RUN
-  vfdFault   = (sw >> 3) & 0x01;  // Status Word bit 3 = FAULT/TRIP
-
-  mb.Ists(ISTS_VFD_RUNNING, vfdRunning);
-  mb.Ists(ISTS_VFD_FAULT,   vfdFault);
-  mb.Ireg(IREG_VFD_FREQ,    freq);
-  mb.Ireg(IREG_VFD_CURR,    curr);
-
-  Serial.printf("[VFD] SW=0x%04X | %s | %.2f Hz | %.1f A\n",
-                sw,
-                vfdRunning ? "RUN " : "STOP",
-                freq / 100.0f,
-                curr / 10.0f);
-  return true;
+  // Ciclar entre pantallas normales
+  currentPage = (DisplayPage)((currentPage + 1) % PAGE_COUNT);
 }
 
-// Procesa un paquete de estado (ACK / heartbeat / reset) recibido de un nodo
-void processNodeStatus(const LoRaStatus* s) {
-  uint8_t n = s->fromNode;
-  if (n < 1 || n > registeredCount) return;
+void btnLongPress() {
+  displayWake();
+  displayLastActivity = millis();
 
+  if (inManualMenu) {
+    // Ejecutar apertura/cierre del sector seleccionado
+    uint8_t node  = SECTOR_MAP[manualCursor].loraNode;
+    uint8_t valve = SECTOR_MAP[manualCursor].loraValve;
+    uint8_t cmd   = sectorState[manualCursor] ? 2 : 1;  // toggle
+    CmdItem item  = {node, valve, cmd};
+    xQueueSend(cmdQueue, &item, 0);
+    Serial.printf("[MANUAL] S%d → N%dV%d %s\n",
+      manualCursor+4, node, valve, cmd==1 ? "ABRIR" : "CERRAR");
+    return;
+  }
+
+  // Long press en pantalla 3 → entrar menú manual
+  if (currentPage == PAGE_SECTORS) {
+    inManualMenu  = true;
+    manualCursor  = 0;
+  }
+  // Long press en menú pero no en sector → salir
+  // (ya cubierto arriba: si inManualMenu → ejecuta, no sale)
+  // Para salir del menú: ciclar con short press hasta PAGE_SECTORS y volver a entrar
+  // O añadir double-press en el futuro
+}
+
+void processButton() {
+  bool raw = (digitalRead(BUTTON_PIN) == LOW);
+
+  if (raw && !btn.pressed) {
+    btn.pressed   = true;
+    btn.longFired = false;
+    btn.pressStart = millis();
+  }
+
+  if (btn.pressed && !btn.longFired &&
+      (millis() - btn.pressStart) > BTN_LONG_MS) {
+    btn.longFired = true;
+    btnLongPress();
+  }
+
+  if (!raw && btn.pressed) {
+    if (!btn.longFired) btnShortPress();
+    btn.pressed = false;
+  }
+}
+
+// ============================================================
+// 15. PROCESADO DE PAQUETES LORA
+// ============================================================
+void processStatus(const LoRaStatus* s) {
+  uint8_t n = s->from;
+  if (n < 1 || n > registeredCount) return;
   bool wasAlive = nodes[n].alive;
   nodes[n].lastSeen = millis();
   nodes[n].alive    = true;
-
   switch (s->type) {
     case 0x00:  // ACK de comando
-      Serial.printf("[ACK] Nodo %d confirmo V%d (ID=%d)\n", n, s->detail, s->messageId);
+      Serial.printf("[ACK] N%d V%d ID=%d\n", n, s->detail, s->id);
       break;
     case 0x01:  // Heartbeat
-      Serial.printf("[HB] Nodo %d vivo. Ciclos: %d\n", n, s->messageId);
-      if (!wasAlive) {
-        nodes[n].fault = false;
-        Serial.printf("[INFO] Nodo %d recuperado.\n", n);
-        updateModbusHealth();
-        updateDisplay("NODO RECUPERADO", "N" + String(n) + " vuelve online");
+      Serial.printf("[HB] N%d\n", n);
+      if (!wasAlive) { nodes[n].fault = false; pushAlert(("N" + String(n) + " recuperado").c_str()); }
+      break;
+    case 0x02:  // Reset anormal
+      nodes[n].resetCause = s->detail;
+      pushAlert(("N" + String(n) + " reset=" + String(s->detail)).c_str());
+      break;
+    case 0x03: {  // STATUS_MANUAL: el nodo accionó una válvula localmente
+      // detail: bits 0-3 = nº válvula, bit 4 = 1(abrir)/0(cerrar)
+      uint8_t valve  = s->detail & 0x0F;
+      bool    abrir  = (s->detail >> 4) & 0x01;
+      Serial.printf("[MANUAL NODO] N%d V%d %s (iniciado en campo)\n",
+        n, valve, abrir ? "ABIERTA" : "CERRADA");
+      // Actualizar estado del sector en pantalla del gateway
+      // El sector correspondiente se deduce del nodo y válvula
+      for (uint8_t i = 0; i < NUM_SECTORS; i++) {
+        if (SECTOR_MAP[i].loraNode == n && SECTOR_MAP[i].loraValve == valve) {
+          sectorState[i] = abrir;
+          prevSectorState[i] = abrir;  // Evitar re-envío del gateway
+          Serial.printf("[MANUAL NODO] → sector %d actualizado en gateway\n", i+4);
+          break;
+        }
       }
+      char alertMsg[40];
+      snprintf(alertMsg, sizeof(alertMsg), "N%d V%d %s (manual campo)",
+               n, valve, abrir ? "ABRIO" : "CERRO");
+      pushAlert(alertMsg);
       break;
-    case 0x02:  // Boot reason (reset anormal)
-      nodes[n].lastResetCause = s->detail;
-      Serial.printf("[ALERTA] Nodo %d reinicio anormal! Causa: %d\n", n, s->detail);
-      updateDisplay("ALERTA RESET", "N" + String(n) + " causa:" + String(s->detail));
-      break;
+    }
   }
 }
 
-// Procesa una solicitud de registro de un nodo nuevo
-// Protocolo: nodo envía PKT_JOIN con su chipId único; gateway asigna ID secuencial y responde
-void processJoin(const LoRaJoin* j) {
-  if (!verifyHMACJoin(j)) {
-    Serial.println("[JOIN] HMAC invalido. Paquete descartado.");
-    return;
-  }
 
-  // Idempotencia: si el chipId ya está registrado, reenviar el mismo ID
+void processJoin(const LoRaJoin* j) {
+  if (!verifyJoin(j)) { Serial.println("[JOIN] HMAC inv"); return; }
   for (uint8_t n = 1; n <= registeredCount; n++) {
     if (chipIdMap[n] == j->chipId) {
-      Serial.printf("[JOIN] Nodo ya registrado (ChipId: 0x%08X → ID: %d). Reenviando REGISTER.\n",
-                    j->chipId, n);
-      LoRaRegister reg;
-      reg.pktType    = PKT_REGISTER;
-      reg.chipId     = j->chipId;
-      reg.assignedId = n;
-      computeHMACRegister(&reg, reg.mac);
-      radio.transmit((uint8_t*)&reg, sizeof(LoRaRegister));
-      radio.startReceive();
-      updateDisplay("JOIN OK", "Re-Reg N" + String(n));
+      LoRaRegister r = {PKT_REGISTER, j->chipId, n};
+      hmacReg(&r, r.mac);
+      if (xSemaphoreTake(radioMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+        radio.transmit((uint8_t*)&r, sizeof(r));
+        radio.startReceive();
+        xSemaphoreGive(radioMutex);
+      }
       return;
     }
   }
-
-  // Comprobar límite de nodos
-  if (registeredCount >= MAX_NODES) {
-    Serial.println("[JOIN] Limite de nodos alcanzado. Solicitud rechazada.");
-    return;
-  }
-
-  // Asignar nuevo ID secuencial
+  if (registeredCount >= MAX_NODES) return;
   registeredCount++;
-  uint8_t newId = registeredCount;
-  chipIdMap[newId] = j->chipId;
+  uint8_t nid = registeredCount;
+  chipIdMap[nid] = j->chipId;
+  nodes[nid] = {millis(), true, false, 0};
+  prefs.putUChar("rc", registeredCount);
+  char key[8]; snprintf(key, 8, "c%d", nid); prefs.putUInt(key, j->chipId);
 
-  // Persistir en NVS
-  prefs.putUChar("regCount", registeredCount);
-  char key[8];
-  snprintf(key, sizeof(key), "chip%d", newId);
-  prefs.putUInt(key, j->chipId);
-
-  // Inicializar salud del nuevo nodo
-  nodes[newId] = { millis(), true, false, 0 };
-  updateModbusHealth();
-
-  // Enviar respuesta con ID asignado
-  LoRaRegister reg;
-  reg.pktType    = PKT_REGISTER;
-  reg.chipId     = j->chipId;
-  reg.assignedId = newId;
-  computeHMACRegister(&reg, reg.mac);
-  radio.transmit((uint8_t*)&reg, sizeof(LoRaRegister));
-  radio.startReceive();
-
-  Serial.printf("[JOIN] Nodo registrado: ChipId 0x%08X → ID %d (Total: %d)\n",
-                j->chipId, newId, registeredCount);
-  updateDisplay("NUEVO NODO", "ID:" + String(newId) + " Reg:" + String(registeredCount));
+  LoRaRegister r = {PKT_REGISTER, j->chipId, nid};
+  hmacReg(&r, r.mac);
+  if (xSemaphoreTake(radioMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+    radio.transmit((uint8_t*)&r, sizeof(r));
+    radio.startReceive();
+    xSemaphoreGive(radioMutex);
+  }
+  Serial.printf("[JOIN] N%d registrado (0x%08X)\n", nid, j->chipId);
+  pushAlert(("Nodo " + String(nid) + " unido").c_str());
 }
 
-// Comprueba si algún nodo supera el timeout de heartbeat
-void checkNodeTimeouts() {
-  bool changed = false;
-  for (uint8_t n = 1; n <= registeredCount; n++) {
-    if (nodes[n].alive &&
-        (millis() - nodes[n].lastSeen) > HEARTBEAT_TIMEOUT_MS) {
-      nodes[n].alive = false;
-      nodes[n].fault = true;
-      Serial.printf("[ALERTA] Nodo %d SIN RESPUESTA (timeout %lu min)\n",
-                    n, HEARTBEAT_TIMEOUT_MS / 60000);
-      changed = true;
-    }
-  }
-  if (changed) {
-    updateModbusHealth();
-    updateDisplay("FALLO NODO", "Ver estado nodos");
-  }
-}
-
-// Espera ACK del nodo con timeout, manteniendo Modbus activo durante la espera
-bool waitForAck(uint8_t expectedNode, uint32_t expectedMsgId) {
-  radio.startReceive();
-  unsigned long t = millis();
-
-  while (millis() - t < ACK_TIMEOUT_MS) {
-    mb.task();  // Mantener Modbus respondiendo al Agrónic durante la espera
-
-    if (gwReceivedFlag) {
-      gwReceivedFlag = false;
-      uint8_t buf[MAX_PKT_LEN] = {0};
-
-      if (radio.readData(buf, sizeof(buf)) == RADIOLIB_ERR_NONE &&
-          buf[0] == PKT_STATUS) {
-        const LoRaStatus* s = (const LoRaStatus*)buf;
-        processNodeStatus(s);
-
-        if (s->fromNode   == expectedNode  &&
-            s->type       == 0x00          &&
-            s->messageId  == expectedMsgId) {
-          return true;
-        }
-      }
-      radio.startReceive();
-    }
-    delay(10);
-  }
-  return false;
-}
-
-// Envía un comando LoRa con reintentos y espera de ACK
-bool sendLoRaCommand(uint8_t node, uint8_t valve, uint8_t cmd) {
+// ============================================================
+// 16. ENVÍO LORA CON REINTENTOS
+// ============================================================
+bool sendCmd(uint8_t node, uint8_t valve, uint8_t cmd) {
   msgCounter++;
   prefs.putUInt("msgId", msgCounter);
-
-  LoRaPacket packet;
-  packet.pktType    = PKT_COMMAND;
-  packet.targetNode = node;
-  packet.valve      = valve;
-  packet.command    = cmd;
-  packet.messageId  = msgCounter;
-  computeHMAC(&packet, packet.mac);
+  LoRaPacket pkt = {PKT_COMMAND, node, valve, cmd, msgCounter};
+  hmacPacket(&pkt, pkt.mac);
 
   for (uint8_t attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    Serial.printf("[TX] Intento %d/%d → Nodo:%d V:%d Cmd:%d ID:%d\n",
-                  attempt + 1, MAX_RETRIES, node, valve, cmd, msgCounter);
+    if (xSemaphoreTake(radioMutex, pdMS_TO_TICKS(1000)) != pdTRUE) continue;
+    radio.transmit((uint8_t*)&pkt, sizeof(pkt));
+    radio.startReceive();
+    xSemaphoreGive(radioMutex);
 
-    int state = radio.transmit((uint8_t*)&packet, sizeof(LoRaPacket));
-    if (state != RADIOLIB_ERR_NONE) {
-      Serial.printf("[TX] Error de transmision: %d\n", state);
-      delay(RETRY_DELAY_MS);
-      continue;
-    }
+    Serial.printf("[TX] %d/%d N%d V%d C%d ID%d\n",
+      attempt+1, MAX_RETRIES, node, valve, cmd, msgCounter);
 
-    if (waitForAck(node, msgCounter)) {
-      Serial.println("[TX] Comando confirmado.");
-      String label = "N" + String(node) + " V" + String(valve) +
-                     (cmd == 1 ? " ABRIO" : (cmd == 2 ? " CERRO" : " PING"));
-      updateDisplay("ACK OK", label);
-      if (node >= 1 && node <= registeredCount) {
-        nodes[node].fault = false;
-        updateModbusHealth();
+    // Espera ACK
+    unsigned long t = millis();
+    while (millis() - t < ACK_TIMEOUT_MS) {
+      if (gwRxFlag) {
+        gwRxFlag = false;
+        uint8_t buf[MAX_PKT_LEN] = {0};
+        if (xSemaphoreTake(radioMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+          int st = radio.readData(buf, sizeof(buf));
+          radio.startReceive();
+          xSemaphoreGive(radioMutex);
+          if (st == RADIOLIB_ERR_NONE && buf[0] == PKT_STATUS) {
+            const LoRaStatus* s = (const LoRaStatus*)buf;
+            processStatus(s);
+            if (s->from == node && s->type == 0x00 && s->id == msgCounter) {
+              if (node <= registeredCount) nodes[node].fault = false;
+              return true;
+            }
+          }
+        }
       }
-      return true;
+      vTaskDelay(pdMS_TO_TICKS(10));
     }
-
-    Serial.printf("[TX] Sin ACK. Reintentando en %dms...\n", RETRY_DELAY_MS);
-    delay(RETRY_DELAY_MS);
+    vTaskDelay(pdMS_TO_TICKS(RETRY_MS));
   }
 
-  // Todos los intentos fallaron
-  Serial.printf("[ERROR] Nodo %d no respondio tras %d intentos.\n", node, MAX_RETRIES);
-  if (node >= 1 && node <= registeredCount) {
-    nodes[node].fault = true;
-    updateModbusHealth();
-  }
-
-  // Revertir el coil para que el Agrónic detecte el fallo en el próximo poll
-  if (cmd == 1 || cmd == 2) {
-    bool prevState = (cmd == 2);
-    uint16_t coilAddr = (valve == 1) ? COIL_VALVE_1 : COIL_VALVE_2;
-    mb.Coil(coilAddr, prevState);
-    if (valve == 1) valve1_state = prevState;
-    else            valve2_state = prevState;
-  }
-
-  updateDisplay("ERROR TX", "N" + String(node) + " sin ACK (V" + String(valve) + ")");
+  if (node <= registeredCount) nodes[node].fault = true;
+  pushAlert(("Sin ACK N" + String(node) + " V" + String(valve)).c_str());
   return false;
 }
 
-// ==========================================
-// 9. SETUP
-// ==========================================
-void setup() {
-  Serial.begin(115200);
-  delay(2000);
-  Serial.println("\n--- INICIANDO GATEWAY LORA ---");
-
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
-
-  Wire.begin(OLED_SDA, OLED_SCL);
-  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println("Fallo OLED");
+// ============================================================
+// 17. LEER OPTOACOPLADORES
+// ============================================================
+void readOptocouplers() {
+  for (uint8_t i = 0; i < NUM_SECTORS; i++) {
+    bool raw = (digitalRead(SECTOR_MAP[i].gpio) == LOW);
+    if (raw != sectorState[i]) {
+      if (millis() - lastChange[i] > DEBOUNCE_MS) {
+        sectorState[i] = raw;
+        Serial.printf("[OPTO] S%d %s\n", i+4, raw ? "ACTIVO" : "libre");
+      }
+    } else {
+      lastChange[i] = millis();
+    }
   }
-  updateDisplay("Iniciando...", "Arrancando sistema");
+}
 
-  // SX1262 LoRa
+// ============================================================
+// 18. TASK — TIEMPO REAL (Core 1)
+// ============================================================
+void taskRealTime(void* pv) {
+  // Configurar LoRa en este core
   SPI.begin(LORA_SCK, LORA_MISO, LORA_MOSI, LORA_NSS);
-  int state = radio.begin(868.0, 125.0, 9, 7, 18, 22, 8, 1.8, false);
-  if (state != RADIOLIB_ERR_NONE) {
-    Serial.printf("[ERROR] Fallo LoRa, codigo: %d\n", state);
-    while (true);
+  int st = radio.begin(868.0, 125.0, 9, 7, 18, 22, 8, 1.8, false);
+  if (st != RADIOLIB_ERR_NONE) {
+    Serial.printf("[ERROR] LoRa: %d\n", st);
+    while (true) vTaskDelay(portMAX_DELAY);
   }
   radio.setDio2AsRfSwitch(true);
   radio.setDio1Action(gwSetFlag);
   radio.startReceive();
-  Serial.println("✓ Radio LoRa SX1262 Iniciada");
+  Serial.println("✓ LoRa SX1262 OK (Core 1)");
 
-  // Modbus RTU – Gateway como Esclavo (Agrónic es el Master)
-  Serial1.begin(9600, SERIAL_8N1, RX_PIN, TX_PIN);
-  mb.begin(&Serial1, DE_RE_PIN);
-  mb.slave(SLAVE_ID);
-  mb.addCoil(COIL_VALVE_1, false);
-  mb.addCoil(COIL_VALVE_2, false);
-  mb.addIsts(ISTS_NODE1_ALIVE,  false);
-  mb.addIsts(ISTS_NODE2_ALIVE,  false);
-  mb.addIsts(ISTS_NODE1_FAULT,  false);
-  mb.addIsts(ISTS_NODE2_FAULT,  false);
-  mb.addIsts(ISTS_VFD_RUNNING,  false);
-  mb.addIsts(ISTS_VFD_FAULT,    false);
-  mb.addIreg(IREG_VFD_FREQ,     0);
-  mb.addIreg(IREG_VFD_CURR,     0);
-  Serial.println("✓ Modbus RTU Esclavo Iniciado (ID=" + String(SLAVE_ID) + ")");
+  CmdItem item;
+  for (;;) {
+    // 1. Botón PRG
+    processButton();
 
-  // Variador ABB ACQ80-04 – Modbus master en Serial2
-  Serial2.begin(VFD_BAUD, SERIAL_8N1, VFD_RX_PIN, VFD_TX_PIN);
-  vfd.begin(&Serial2, VFD_DE_PIN);
-  vfd.master();
-  Serial.println("✓ Modbus RTU Master VFD Iniciado (Serial2, ID esclavo=" + String(VFD_SLAVE_ID) + ")");
+    // 2. Optoacopladores
+    readOptocouplers();
 
-  // NVS: recuperar msgCounter y tabla de registro de nodos
-  prefs.begin("agro", false);
-  msgCounter = prefs.getUInt("msgId", 0);
-  Serial.printf("✓ Contador de mensajes recuperado: %d\n", msgCounter);
+    // 3. Detectar flancos → encolar
+    for (uint8_t i = 0; i < NUM_SECTORS; i++) {
+      if (sectorState[i] != prevSectorState[i]) {
+        prevSectorState[i] = sectorState[i];
+        // Despertar pantalla si hay cambio de sector
+        if (sectorState[i]) displayWake();
+        CmdItem ci = {
+          SECTOR_MAP[i].loraNode,
+          SECTOR_MAP[i].loraValve,
+          (uint8_t)(sectorState[i] ? 1 : 2)
+        };
+        if (xQueueSend(cmdQueue, &ci, 0) != pdTRUE) {
+          pushAlert("Cola CMDs llena!");
+        }
+        Serial.printf("[FLANCO] S%d → N%dV%d %s (encolado)\n",
+          i+4, ci.node, ci.valve, ci.cmd==1 ? "ABRIR" : "CERRAR");
+      }
+    }
 
-  registeredCount = prefs.getUChar("regCount", 0);
-  for (uint8_t n = 1; n <= registeredCount; n++) {
-    char key[8];
-    snprintf(key, sizeof(key), "chip%d", n);
-    chipIdMap[n] = prefs.getUInt(key, 0);
-    nodes[n] = { millis(), true, false, 0 };  // Asumidos vivos al arrancar
-    Serial.printf("  Nodo %d: ChipId 0x%08X\n", n, chipIdMap[n]);
+    // 4. Procesar UN comando de la cola
+    if (xQueueReceive(cmdQueue, &item, 0) == pdTRUE) {
+      sendCmd(item.node, item.valve, item.cmd);
+      if (xSemaphoreTake(radioMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        radio.startReceive();
+        xSemaphoreGive(radioMutex);
+      }
+    }
+
+    // 5. Recepción LoRa (heartbeats, JOINs)
+    if (gwRxFlag) {
+      gwRxFlag = false;
+      uint8_t buf[MAX_PKT_LEN] = {0};
+      if (xSemaphoreTake(radioMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        int ret = radio.readData(buf, sizeof(buf));
+        radio.startReceive();
+        xSemaphoreGive(radioMutex);
+        if (ret == RADIOLIB_ERR_NONE) {
+          if (buf[0] == PKT_STATUS) processStatus((const LoRaStatus*)buf);
+          else if (buf[0] == PKT_JOIN) processJoin((const LoRaJoin*)buf);
+        }
+      }
+    }
+
+    // 6. Timeout nodos (cada 30s)
+    if (millis() - lastTimeout > 30000) {
+      lastTimeout = millis();
+      for (uint8_t n = 1; n <= registeredCount; n++) {
+        if (nodes[n].alive && (millis() - nodes[n].lastSeen) > HB_TIMEOUT_MS) {
+          nodes[n].alive = false;
+          nodes[n].fault = true;
+          pushAlert(("N" + String(n) + " timeout").c_str());
+        }
+      }
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(10));
   }
-  updateModbusHealth();
-
-  updateDisplay("LISTO", "Esperando ordenes");
-  Serial.printf("--- SISTEMA LISTO (%d nodos registrados) ---\n", registeredCount);
-  Serial.println("Comandos: A1 C1 A2 C2 PING1 PING2 NODES CLEAR_NODES");
 }
 
-// ==========================================
-// 10. LOOP
-// ==========================================
+// ============================================================
+// 19. TASK — CONECTIVIDAD (Core 0)
+// ============================================================
+bool vfdReadCb(Modbus::ResultCode ev, uint16_t, void*) {
+  vfdPollPending = false;
+  if (ev != Modbus::EX_SUCCESS) { Serial.printf("[VFD] Err %d\n", ev); return true; }
+  bool prevFault = vfdFault;
+  vfdRunning = (vfdRaw[0] >> 2) & 1;
+  vfdFault   = (vfdRaw[0] >> 3) & 1;
+  if (vfdFault && !prevFault) pushAlert("FALLO VFD: trip ABB");
+  Serial.printf("[VFD] %s %.2fHz %.1fA\n",
+    vfdRunning ? "RUN" : "STOP", vfdRaw[1]/100.0f, vfdRaw[2]/10.0f);
+  return true;
+}
+
+void taskConnectivity(void* pv) {
+  // Modbus
+  Serial1.begin(VFD_BAUD, SERIAL_8N1, VFD_RX, VFD_TX);
+  vfd.begin(&Serial1, VFD_DE);
+  vfd.master();
+  Serial.println("✓ Modbus RTU master VFD (Core 0)");
+
+  // WiFi + Blynk
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  unsigned long wt = millis();
+  while (!WiFi.isConnected() && millis() - wt < 15000) {
+    vTaskDelay(pdMS_TO_TICKS(500)); Serial.print(".");
+  }
+  if (WiFi.isConnected()) {
+    Serial.printf("\n✓ WiFi (%s)\n", WiFi.localIP().toString().c_str());
+    Blynk.config(BLYNK_TOKEN);
+    Blynk.connect(5000);
+  } else {
+    Serial.println("\n[WARN] WiFi timeout — offline");
+  }
+
+  for (;;) {
+    if (WiFi.isConnected()) Blynk.run();
+    vfd.task();
+
+    // Poll VFD cada 5s
+    if (!vfdPollPending && millis() - lastVfdPoll > 5000) {
+      lastVfdPoll = millis();
+      vfdPollPending = true;
+      vfd.readHreg(VFD_ID, REG_SW, vfdRaw, 3, vfdReadCb);
+    }
+
+    // Push Blynk VFD cada 30s
+    if (millis() - lastBlynkPush > 30000) {
+      lastBlynkPush = millis();
+      if (Blynk.connected()) {
+        Blynk.virtualWrite(VP_FREQ,   vfdRaw[1] / 100.0f);
+        Blynk.virtualWrite(VP_CURR,   vfdRaw[2] / 10.0f);
+        Blynk.virtualWrite(VP_STATUS, vfdRunning ? "RUN" : "STOP");
+      }
+    }
+
+    // Push salud cada 60s
+    if (millis() - lastHealthPush > 60000) {
+      lastHealthPush = millis();
+      if (Blynk.connected()) {
+        Blynk.virtualWrite(VP_TEMP, temperatureRead());
+        for (uint8_t n = 1; n <= 3; n++) {
+          uint8_t st = (n > registeredCount) ? 0 : (nodes[n].fault ? 2 : (nodes[n].alive ? 1 : 2));
+          if (n==1) Blynk.virtualWrite(VP_N1, st);
+          else if (n==2) Blynk.virtualWrite(VP_N2, st);
+          else Blynk.virtualWrite(VP_N3, st);
+        }
+      }
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
+}
+
+// ============================================================
+// 20. TASK — DISPLAY (Core 0)
+// ============================================================
+void taskDisplay(void* pv) {
+  // Inicializar OLED
+  Wire.begin(OLED_SDA, OLED_SCL);
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("[WARN] Fallo OLED");
+  }
+  display.clearDisplay(); display.display();
+  Serial.println("✓ OLED OK (Core 0 taskDisplay)");
+
+  for (;;) {
+    // Auto-apagado por inactividad (solo si no hay riego activo)
+    bool active = anySectorActive();
+    if (active && !displayOn) displayWake();
+    if (!active && displayOn &&
+        (millis() - displayLastActivity) > DISPLAY_TIMEOUT_MS) {
+      displaySleep();
+    }
+
+    // Carousel tick
+    if (millis() - carouselLastTick > CAROUSEL_MS) {
+      carouselLastTick = millis();
+      carouselOffset++;
+    }
+
+    // Render
+    renderDisplay();
+
+    vTaskDelay(pdMS_TO_TICKS(200));  // 5 fps — suficiente para OLED
+  }
+}
+
+// ============================================================
+// 21. SETUP
+// ============================================================
+void setup() {
+  Serial.begin(115200);
+  delay(1500);
+  Serial.println("\n=== GATEWAY CASETA — AGRONIC IOT v2.0 (FreeRTOS) ===");
+
+  // GPIOs optoacoplador
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  for (uint8_t i = 0; i < NUM_SECTORS; i++) {
+    pinMode(SECTOR_MAP[i].gpio, INPUT_PULLUP);
+  }
+  Serial.println("✓ GPIOs optoacoplador configurados");
+
+  // FreeRTOS primitivas
+  cmdQueue    = xQueueCreate(16, sizeof(CmdItem));
+  displayMutex = xSemaphoreCreateMutex();
+  radioMutex   = xSemaphoreCreateMutex();
+  nodesMutex   = xSemaphoreCreateMutex();
+
+  // NVS
+  prefs.begin("agro", false);
+  msgCounter      = prefs.getUInt("msgId", 0);
+  registeredCount = prefs.getUChar("rc", 0);
+  for (uint8_t n = 1; n <= registeredCount; n++) {
+    char key[8]; snprintf(key, 8, "c%d", n);
+    chipIdMap[n] = prefs.getUInt(key, 0);
+    nodes[n]     = {millis(), true, false, 0};
+    Serial.printf("  Nodo %d: 0x%08X\n", n, chipIdMap[n]);
+  }
+  Serial.printf("✓ NVS: msgId=%d, nodos=%d\n", msgCounter, registeredCount);
+
+  // Lanzar tareas FreeRTOS
+  // taskRealTime → Core 1, prioridad 3 (alta)
+  xTaskCreatePinnedToCore(taskRealTime,    "RealTime", 8192, NULL, 3, NULL, 1);
+  // taskConnectivity → Core 0, prioridad 1
+  xTaskCreatePinnedToCore(taskConnectivity,"Conn",     6144, NULL, 1, NULL, 0);
+  // taskDisplay → Core 0, prioridad 1
+  xTaskCreatePinnedToCore(taskDisplay,     "Display",  4096, NULL, 1, NULL, 0);
+
+  Serial.println("=== TAREAS FREERTOS LANZADAS ===");
+  Serial.println("Core 1: RealTime (LoRa + optoacoplador + botón)");
+  Serial.println("Core 0: Connectivity (WiFi + Blynk + VFD)");
+  Serial.println("Core 0: Display (OLED 4 pantallas + menú manual)");
+}
+
+// loop() vacío — todo va en tareas FreeRTOS
 void loop() {
-  // 1. MODBUS: atender al Agrónic + procesar respuestas del variador
-  mb.task();
-  vfd.task();
-
-  // 1b. POLLING VFD: leer SW + FREQ + CURR cada 2 s (no bloqueante)
-  if (!vfdPollPending && millis() - lastVfdPoll > 2000) {
-    lastVfdPoll    = millis();
-    vfdPollPending = true;
-    vfd.readHreg(VFD_SLAVE_ID, VFD_REG_SW, vfdRawData, 3, vfdReadCb);
-  }
-
-  // 2. RECEPCIÓN LORA: heartbeats, ACKs y solicitudes de registro
-  if (gwReceivedFlag) {
-    gwReceivedFlag = false;
-    uint8_t buf[MAX_PKT_LEN] = {0};
-
-    if (radio.readData(buf, sizeof(buf)) == RADIOLIB_ERR_NONE) {
-      switch (buf[0]) {
-        case PKT_STATUS:
-          processNodeStatus((const LoRaStatus*)buf);
-          break;
-        case PKT_JOIN:
-          processJoin((const LoRaJoin*)buf);
-          break;
-        default:
-          break;
-      }
-    }
-    radio.startReceive();
-  }
-
-  // 3. CAMBIOS DE COILS MODBUS → COMANDOS LORA
-  // Topología actual: ambas válvulas en el nodo físico 1
-  // Para nodos separados: sendLoRaCommand(2, 1, cmd) para la segunda válvula
-  bool mb_v1 = mb.Coil(COIL_VALVE_1);
-  if (mb_v1 != valve1_state) {
-    valve1_state = mb_v1;
-    sendLoRaCommand(1, 1, valve1_state ? 1 : 2);
-    radio.startReceive();
-  }
-
-  bool mb_v2 = mb.Coil(COIL_VALVE_2);
-  if (mb_v2 != valve2_state) {
-    valve2_state = mb_v2;
-    sendLoRaCommand(1, 2, valve2_state ? 1 : 2);
-    radio.startReceive();
-  }
-
-  // 4. CONTROL POR TERMINAL SERIE
-  if (Serial.available()) {
-    String input = Serial.readStringUntil('\n');
-    input.trim();
-
-    if (input == "A1") {
-      valve1_state = true;  mb.Coil(COIL_VALVE_1, true);
-      sendLoRaCommand(1, 1, 1); radio.startReceive();
-    } else if (input == "C1") {
-      valve1_state = false; mb.Coil(COIL_VALVE_1, false);
-      sendLoRaCommand(1, 1, 2); radio.startReceive();
-    } else if (input == "A2") {
-      valve2_state = true;  mb.Coil(COIL_VALVE_2, true);
-      sendLoRaCommand(1, 2, 1); radio.startReceive();
-    } else if (input == "C2") {
-      valve2_state = false; mb.Coil(COIL_VALVE_2, false);
-      sendLoRaCommand(1, 2, 2); radio.startReceive();
-    } else if (input == "PING1") {
-      sendLoRaCommand(1, 0, 3); radio.startReceive();
-    } else if (input == "PING2") {
-      sendLoRaCommand(2, 0, 3); radio.startReceive();
-    } else if (input == "NODES") {
-      Serial.printf("Nodos registrados: %d/%d\n", registeredCount, MAX_NODES);
-      for (uint8_t n = 1; n <= registeredCount; n++) {
-        Serial.printf("  Nodo %d | ChipId: 0x%08X | %s | %s\n",
-          n, chipIdMap[n],
-          nodes[n].alive ? "VIVO " : "CAIDO",
-          nodes[n].fault ? "FALLO" : "OK");
-      }
-    } else if (input == "CLEAR_NODES") {
-      Serial.println("[CLEAR] Borrando tabla de registro...");
-      prefs.putUChar("regCount", 0);
-      for (uint8_t n = 1; n <= registeredCount; n++) {
-        char key[8]; snprintf(key, sizeof(key), "chip%d", n);
-        prefs.remove(key);
-      }
-      registeredCount = 0;
-      memset(chipIdMap, 0, sizeof(chipIdMap));
-      memset(nodes,     0, sizeof(nodes));
-      updateModbusHealth();
-      Serial.println("[CLEAR] Registro borrado. Los nodos deberan re-registrarse.");
-      updateDisplay("REGISTRO BORRADO", "CLEAR_NODES OK");
-    } else {
-      Serial.println("Comandos: A1 C1 A2 C2 PING1 PING2 NODES CLEAR_NODES");
-    }
-  }
-
-  // 5. BOTÓN FÍSICO (alterna Válvula 1)
-  if (digitalRead(BUTTON_PIN) == LOW) {
-    delay(50);
-    if (digitalRead(BUTTON_PIN) == LOW) {
-      Serial.println("BOTON: Alternando V1");
-      valve1_state = !valve1_state;
-      mb.Coil(COIL_VALVE_1, valve1_state);
-      sendLoRaCommand(1, 1, valve1_state ? 1 : 2);
-      radio.startReceive();
-      while (digitalRead(BUTTON_PIN) == LOW) { delay(10); }
-    }
-  }
-
-  // 6. COMPROBACIÓN DE TIMEOUTS DE NODOS (cada 30 segundos)
-  if (millis() - lastTimeoutCheck > 30000) {
-    lastTimeoutCheck = millis();
-    checkNodeTimeouts();
-  }
-
-  // 7. REFRESCAR PANTALLA (cada 2 segundos)
-  if (millis() - lastDisplayUpdate > 2000) {
-    lastDisplayUpdate = millis();
-    updateDisplay("ESCUCHANDO", "ID:" + String(msgCounter));
-  }
+  vTaskDelay(portMAX_DELAY);
 }
