@@ -30,32 +30,42 @@
 #define SCREEN_WIDTH  128
 #define SCREEN_HEIGHT 64
 
-// DRV8833 – Canal A (Válvula 1)
-#define PIN_IN1       4
-#define PIN_IN2       5
-// DRV8833 – Canal B (Válvula 2)
-#define PIN_IN3       38
-#define PIN_IN4       39
-// DRV8833 – STBY
-#define PIN_STBY      7
+// DRV8833 — pines GPIO 3-7 (cluster compacto, fácil de cablear)
+// Canal A → Válvula 1 (solenoide latch Baccara 9V)
+#define PIN_AIN1       4   // AIN1: pulso ABRIR  V1
+#define PIN_AIN2       3   // AIN2: pulso CERRAR V1
+// Canal B → Válvula 2
+#define PIN_BIN1       6   // BIN1: pulso ABRIR  V2
+#define PIN_BIN2       5   // BIN2: pulso CERRAR V2
+// Enable
+#define PIN_STBY      7   // STBY: LOW=standby, HIGH=activo
 
 // ==========================================
 // 2. CONFIGURACIÓN DEL NODO
 // ==========================================
 #define MAX_NODES        8
-#define SLEEP_INTERVAL_S 30
-#define LISTEN_WINDOW_MS 3000
-#define HEARTBEAT_EVERY  10
+#define SLEEP_DAY_S      30    // Ciclo día: 8h-19h
+#define SLEEP_NIGHT_S   300    // Ciclo noche: 19h-8h (5 min)
+#define LISTEN_DAY_MS   3000   // Ventana escucha LoRa — día
+#define LISTEN_NIGHT_MS  500   // Ventana mínima — noche (irrigación inactiva)
+#define HB_EVERY_DAY     10   // Heartbeat cada 10 ciclos = 5 min (día)
+#define HB_EVERY_NIGHT    2   // Heartbeat cada 2 ciclos = 10 min (noche, < 12 min timeout GW)
 #define WDT_TIMEOUT_S    10
 #define JOIN_TIMEOUT_MS  8000
+// Compatibilidad con código que usa SLEEP_INTERVAL_S y LISTEN_WINDOW_MS
+#define SLEEP_INTERVAL_S SLEEP_DAY_S
+#define LISTEN_WINDOW_MS LISTEN_DAY_MS
 
 // Display on-demand (batería)
 #define BUTTON_PIN       0
 #define DISPLAY_ON_MS    20000  // 20s visible tras PRG (más tiempo para menú manual)
 #define BTN_LONG_MS      800
 
-// Timeout de conexión con gateway (2 ciclos sin ACK = sin conexión)
-#define GW_CONN_TIMEOUT_MS  (2UL * SLEEP_INTERVAL_S * 1000 + 10000)
+// Ciclos de wakeup sin ACK del gateway antes de considerarlo caído.
+// Día:   24 ciclos × 30s  = 12 min (= HB_TIMEOUT gateway)
+// Noche:  3 ciclos × 300s = 15 min (> HB_TIMEOUT de 12 min)
+#define GW_CONN_MAX_WAKES_DAY    24
+#define GW_CONN_MAX_WAKES_NIGHT   3
 
 // ==========================================
 // 3. SEGURIDAD – PROTOCOLO Y CLAVES
@@ -71,6 +81,7 @@
 
 #define PKT_JOIN     0xC3
 #define PKT_REGISTER 0xD4
+#define PKT_SYNC     0xE5  // Gateway → nodos: hora actual para modo día/noche
 
 #define HMAC_KEY_LEN 16
 #define MAC_LEN      4
@@ -111,6 +122,12 @@ struct __attribute__((packed)) LoRaRegister {
   uint8_t  mac[MAC_LEN];
 };
 
+struct __attribute__((packed)) LoRaSync {
+  uint8_t pktType;  // PKT_SYNC 0xE5
+  uint8_t hour;     // 0-23
+  uint8_t mac[4];   // HMAC-SHA256 truncado sobre {pktType, hour}
+};
+
 // ==========================================
 // 5. VARIABLES RTC (sobreviven al deep sleep)
 // ==========================================
@@ -118,7 +135,10 @@ RTC_DATA_ATTR uint32_t lastMessageId  = 0;
 RTC_DATA_ATTR uint32_t wakeCount      = 0;
 RTC_DATA_ATTR bool     valve1Open     = false;
 RTC_DATA_ATTR bool     valve2Open     = false;
-RTC_DATA_ATTR unsigned long lastGwAck = 0;  // Timestamp del último ACK exitoso del gateway
+// UINT32_MAX = nunca recibido ACK; 0 = ACK recibido en ciclo actual; incrementa cada ciclo.
+// Seguro en deep sleep: millis() se resetea pero wakesSinceAck no depende del tiempo.
+RTC_DATA_ATTR uint32_t wakesSinceAck = UINT32_MAX;
+RTC_DATA_ATTR bool     nightMode      = false;  // Actualizado por PKT_SYNC del gateway
 
 // ==========================================
 // 6. OBJETOS GLOBALES
@@ -204,108 +224,114 @@ bool verifyHMACRegister(const LoRaRegister* r) {
   return memcmp(exp, r->mac, MAC_LEN) == 0;
 }
 
-// ==========================================
-// 9. CONEXIÓN CON GATEWAY
-// ==========================================
-// Devuelve true si hemos recibido un ACK del gateway en los últimos GW_CONN_TIMEOUT_MS
-// lastGwAck sobrevive al deep sleep en RTC_DATA_ATTR
-bool gatewayConnected() {
-  if (lastGwAck == 0) return false;  // Nunca recibido ACK
-  return (millis() - lastGwAck) < GW_CONN_TIMEOUT_MS;
+bool verifyHMACSync(const LoRaSync* s) {
+  uint8_t full[32];
+  uint8_t d[2] = {s->pktType, s->hour};
+  mbedtls_md_hmac(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256),
+                  HMAC_KEY, HMAC_KEY_LEN, d, 2, full);
+  return memcmp(full, s->mac, 4) == 0;
 }
 
 // ==========================================
-// 10. DISPLAY — PANTALLA 1: INFO
+// 9. CONEXIÓN CON GATEWAY
 // ==========================================
+bool gatewayConnected() {
+  if (wakesSinceAck == UINT32_MAX) return false;
+  uint32_t maxW = nightMode ? GW_CONN_MAX_WAKES_NIGHT : GW_CONN_MAX_WAKES_DAY;
+  return wakesSinceAck < maxW;
+}
+
+// ==========================================
+// 10. DISPLAY — HELPERS (portrait 64×128)
+// ==========================================
+// dispLine: size 1, row×8 px, máx 10 chars.
+static void dispLine(uint8_t row, const char* fmt, ...) {
+  char buf[12];
+  va_list args; va_start(args, fmt); vsnprintf(buf, sizeof(buf), fmt, args); va_end(args);
+  display.setTextSize(1);
+  display.setCursor(0, row * 8);
+  display.print(buf);
+}
+// dispBig: size 2 (12×16 px/char), y en píxeles, máx 5 chars.
+static void dispBig(uint8_t y_px, const char* fmt, ...) {
+  char buf[7];
+  va_list args; va_start(args, fmt); vsnprintf(buf, sizeof(buf), fmt, args); va_end(args);
+  display.setTextSize(2);
+  display.setCursor(0, y_px);
+  display.print(buf);
+  display.setTextSize(1);
+}
+
+// ==========================================
+// 11. DISPLAY — PANTALLA 1: INFO (portrait)
+// ==========================================
+// Layout 64×128 px:
+// y=0  s1: ID + modo día/noche
+// y=9  s2: GW:OK / GW:X  (big — crítico)
+// y=26 s2: V1:ON / V1:--
+// y=43 s2: V2:ON / V2:--
+// y=61 s1: batería
+// y=70 s1: temperatura
+// y=79 s1: ciclos
+// y=88 s1: último ACK
+// y=112 s1: hints navegación
 void renderPageInfo() {
   display.clearDisplay();
-  display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
 
-  // Línea 0: ID + modo
-  display.setCursor(0, 0);
-  display.printf("=NODO #%d  868MHz=", nodeId > 0 ? nodeId : 0);
-
-  // Línea 1: conexión con gateway
   bool conn = gatewayConnected();
-  display.setCursor(0, 8);
-  display.printf("GW: %s", conn ? "CONECTADO   " : "SIN CONEXION");
 
-  // Línea 2: estado válvulas
-  display.setCursor(0, 16);
-  display.printf("V1: %-8s  V2: %-8s",
-    valve1Open ? "ABIERTA" : "cerrada",
-    valve2Open ? "ABIERTA" : "cerrada");
+  dispLine(0, "NODO#%d %s", nodeId, nightMode ? "NOC" : "DIA");
+  dispBig(9,  "GW:%s", conn ? "OK" : "X ");
+  dispBig(26, "V1:%s", valve1Open ? "ON" : "--");
+  dispBig(43, "V2:%s", valve2Open ? "ON" : "--");
 
-  // Línea 3: ciclos y último mensaje
-  display.setCursor(0, 24);
-  display.printf("Ciclos:%-5d MsgID:%-4d", wakeCount, lastMessageId);
-
-  // Línea 4: batería (ADC GPIO1 con divisor ×2 en Heltec V3)
-  int raw  = analogRead(1);
+  int raw = analogRead(1);
   float vBat = raw * (3.3f / 4095.0f) * 2.0f;
-  display.setCursor(0, 32);
-  display.printf("Bat: %.2fV  Temp:%.0fC", vBat, temperatureRead());
-
-  // Línea 5: tiempo desde último ACK del gateway
-  display.setCursor(0, 40);
-  if (lastGwAck == 0) {
-    display.print("GW ult ACK: nunca");
+  dispLine(7,  "Bat:%.2fV", vBat);
+  dispLine(8,  "T:%.0fC", temperatureRead());
+  dispLine(9,  "C:%d", wakeCount);
+  if (wakesSinceAck == UINT32_MAX) {
+    dispLine(10, "ACK:nunca");
   } else {
-    unsigned long ago = (millis() - lastGwAck) / 1000;
-    display.printf("GW ult ACK: %lus ago", ago);
+    dispLine(10, "ACK:%dW", wakesSinceAck);  // ciclos desde último ACK
   }
-
-  // Línea 6: vacía / separador
-  display.setCursor(0, 48);
-  display.print("--------------------");
-
-  // Línea 7: instrucción navegación
-  display.setCursor(0, 56);
-  display.print("PRG:pant  LNG:manual");
+  dispLine(14, "LNG=manual");
+  dispLine(15, "PRG=pant");
 
   display.display();
 }
 
 // ==========================================
-// 11. DISPLAY — PANTALLA 2: CONTROL MANUAL
+// 12. DISPLAY — PANTALLA 2: CONTROL MANUAL
 // ==========================================
 // Menú de 3 opciones: V1, V2, SALIR
 // Short press: mueve cursor · Long press: ejecuta acción
 void renderPageManual() {
   display.clearDisplay();
-  display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
 
-  display.setCursor(0, 0);
-  display.print("=CONTROL MANUAL=");
+  dispLine(0, "CTRL MAN");
 
-  // Opción 0: Válvula 1
-  display.setCursor(0, 12);
-  display.printf("%cV1: %-8s [%s]",
-    manualCursor == 0 ? '>' : ' ',
-    valve1Open ? "ABIERTA" : "cerrada",
-    valve1Open ? "CERRAR" : "ABRIR ");
+  // V1
+  dispLine(2, "%cV1:%s", manualCursor == 0 ? '>' : ' ',
+    valve1Open ? "ABIER" : "cerrd");
+  dispLine(3, " [%s]", valve1Open ? "CERRAR" : "ABRIR ");
 
-  // Opción 1: Válvula 2
-  display.setCursor(0, 24);
-  display.printf("%cV2: %-8s [%s]",
-    manualCursor == 1 ? '>' : ' ',
-    valve2Open ? "ABIERTA" : "cerrada",
-    valve2Open ? "CERRAR" : "ABRIR ");
+  // V2
+  dispLine(5, "%cV2:%s", manualCursor == 1 ? '>' : ' ',
+    valve2Open ? "ABIER" : "cerrd");
+  dispLine(6, " [%s]", valve2Open ? "CERRAR" : "ABRIR ");
 
-  // Opción 2: Salir al menú de info
-  display.setCursor(0, 36);
-  display.printf("%c[VOLVER A INFO]",
-    manualCursor == 2 ? '>' : ' ');
+  // Volver
+  dispLine(8, "%c[VOLVER]", manualCursor == 2 ? '>' : ' ');
 
-  display.setCursor(0, 48);
-  display.print("--------------------");
-  display.setCursor(0, 56);
-  display.print("PRG=mover  LNG=OK");
+  dispLine(11, "PRG=mover");
+  dispLine(12, "LNG=OK");
 
   display.display();
 }
+
 
 // ==========================================
 // 12. DISPLAY — CONTROL GENERAL
@@ -336,23 +362,23 @@ void renderDisplay() {
 void sendStatus(uint8_t type, uint8_t detail, uint32_t msgId);
 
 void accionarValvula(uint8_t valve, bool abrir) {
-  uint8_t pinA = (valve == 1) ? PIN_IN1 : PIN_IN3;
-  uint8_t pinB = (valve == 1) ? PIN_IN2 : PIN_IN4;
+  uint8_t pinA = (valve == 1) ? PIN_AIN1 : PIN_BIN1;
+  uint8_t pinB = (valve == 1) ? PIN_AIN2 : PIN_BIN2;
 
   Serial.printf(">>> V%d %s <<<\n", valve, abrir ? "APERTURA" : "CIERRE");
 
-  digitalWrite(PIN_STBY, HIGH);
+  digitalWrite(PIN_STBY, HIGH);  // Activar driver DRV8833
   delay(1);
 
   if (abrir) { digitalWrite(pinA, HIGH); digitalWrite(pinB, LOW); }
   else       { digitalWrite(pinA, LOW);  digitalWrite(pinB, HIGH); }
 
-  delay(100);  // Pulso latch 100ms para Baccara 9V
+  delay(35);  // Pulso latch 35ms para Baccara 9V
 
   digitalWrite(pinA, LOW);
   digitalWrite(pinB, LOW);
   delay(1);
-  digitalWrite(PIN_STBY, LOW);
+  digitalWrite(PIN_STBY, LOW);  // Standby → ahorro energía
 
   // Actualizar estado en RTC (persiste en deep sleep)
   if (valve == 1) valve1Open = abrir;
@@ -477,15 +503,19 @@ void processButton() {
 // 16. DEEP SLEEP
 // ==========================================
 void goToSleep() {
-  Serial.printf("[SLEEP] → %ds  V1:%s V2:%s\n",
-    SLEEP_INTERVAL_S,
+  uint32_t sleepS = nightMode ? SLEEP_NIGHT_S : SLEEP_DAY_S;
+  Serial.printf("[SLEEP] → %ds (%s) V1:%s V2:%s\n",
+    sleepS, nightMode ? "NOCHE" : "DIA",
     valve1Open ? "ABT" : "CER",
     valve2Open ? "ABT" : "CER");
 
   sleepDisplay();
   digitalWrite(VEXT, HIGH);  // Apagar OLED y TCXO
 
-  esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_INTERVAL_S * 1000000ULL);
+  // Incrementar contador de wakes sin ACK antes de dormir (se resetea a 0 al recibir ACK)
+  if (wakesSinceAck != UINT32_MAX) wakesSinceAck++;
+
+  esp_sleep_enable_timer_wakeup((uint64_t)sleepS * 1000000ULL);
   esp_deep_sleep_start();
 }
 
@@ -524,7 +554,7 @@ bool performJoin() {
             prefs.begin("node", false);
             prefs.putUChar("id", nodeId);
             prefs.end();
-            lastGwAck = millis();  // Primer contacto exitoso
+            wakesSinceAck = 0;  // Primer contacto exitoso
             Serial.printf("[JOIN] ID asignado: %d\n", nodeId);
             return true;
           }
@@ -562,11 +592,11 @@ void setup() {
   pinMode(BUTTON_PIN, INPUT_PULLUP);
 
   // DRV8833
-  pinMode(PIN_IN1,  OUTPUT); digitalWrite(PIN_IN1,  LOW);
-  pinMode(PIN_IN2,  OUTPUT); digitalWrite(PIN_IN2,  LOW);
-  pinMode(PIN_IN3,  OUTPUT); digitalWrite(PIN_IN3,  LOW);
-  pinMode(PIN_IN4,  OUTPUT); digitalWrite(PIN_IN4,  LOW);
-  pinMode(PIN_STBY, OUTPUT); digitalWrite(PIN_STBY, LOW);
+  pinMode(PIN_AIN1,  OUTPUT); digitalWrite(PIN_AIN1,  LOW);
+  pinMode(PIN_AIN2,  OUTPUT); digitalWrite(PIN_AIN2,  LOW);
+  pinMode(PIN_BIN1,  OUTPUT); digitalWrite(PIN_BIN1,  LOW);
+  pinMode(PIN_BIN2,  OUTPUT); digitalWrite(PIN_BIN2,  LOW);
+  pinMode(PIN_STBY, OUTPUT); digitalWrite(PIN_STBY, LOW);  // Standby → ahorro (se sube en accionarValvula)
 
   // OLED: inicializar APAGADO (ahorrar batería)
   Wire.begin(OLED_SDA, OLED_SCL);
@@ -574,6 +604,7 @@ void setup() {
     Serial.println("[WARN] Fallo OLED");
   }
   display.clearDisplay(); display.display();
+  display.setRotation(1);  // 90° CW — nodo montado vertical → canvas 64×128 px
   display.ssd1306_command(SSD1306_DISPLAYOFF);
   displayOn = false;
 
@@ -586,7 +617,8 @@ void setup() {
 
   // SX1262 LoRa
   SPI.begin(LORA_SCK, LORA_MISO, LORA_MOSI, LORA_NSS);
-  int state = radio.begin(868.0, 125.0, 9, 7, 18, 22, 8, 1.8, false);
+  // Sin antena: ≤5 dBm. Con antena FRP 3-5 dBi: 10 dBm (≤25 mW ERP, legal EU 868 MHz).
+  int state = radio.begin(868.0, 125.0, 9, 7, 18, 10, 8, 1.8, false);
   if (state != RADIOLIB_ERR_NONE) {
     Serial.printf("[ERROR] LoRa: %d\n", state);
     goToSleep();
@@ -623,15 +655,18 @@ void setup() {
 }
 
 // ==========================================
-// 19. LOOP (un ciclo → deep sleep al final)
+// 19. LOOP — CICLO PRODUCCIÓN (wake → escucha → sleep)
 // ==========================================
 void loop() {
   wakeCount++;
   esp_task_wdt_reset();
 
+  uint32_t listenMs = nightMode ? LISTEN_NIGHT_MS : LISTEN_DAY_MS;
+  uint8_t  hbEvery  = nightMode ? HB_EVERY_NIGHT   : HB_EVERY_DAY;
+
   // Heartbeat periódico
-  if (wakeCount % HEARTBEAT_EVERY == 0) {
-    Serial.printf("[HB] Ciclo %d\n", wakeCount);
+  if (wakeCount % hbEvery == 0) {
+    Serial.printf("[HB] Ciclo %d (%s)\n", wakeCount, nightMode ? "NOCHE" : "DIA");
     sendStatus(STATUS_HEARTBEAT, 0, wakeCount);
   }
 
@@ -640,7 +675,7 @@ void loop() {
   radio.startReceive();
   unsigned long listenStart = millis();
 
-  while (millis() - listenStart < LISTEN_WINDOW_MS) {
+  while (millis() - listenStart < listenMs) {
     esp_task_wdt_reset();
     processButton();   // Botón PRG activo durante la ventana de escucha
 
@@ -650,35 +685,46 @@ void loop() {
       uint8_t buf[MAX_PKT_LEN] = {0};
       int rxState = radio.readData(buf, sizeof(buf));
 
-      if (rxState == RADIOLIB_ERR_NONE && buf[0] == PKT_COMMAND) {
-        const LoRaPacket* pkt = (const LoRaPacket*)buf;
+      if (rxState == RADIOLIB_ERR_NONE) {
+        if (buf[0] == PKT_COMMAND) {
+          const LoRaPacket* pkt = (const LoRaPacket*)buf;
 
-        Serial.printf("[RX] N:%d V:%d Cmd:%d ID:%d\n",
-          pkt->targetNode, pkt->valve, pkt->command, pkt->messageId);
+          Serial.printf("[RX] N:%d V:%d Cmd:%d ID:%d\n",
+            pkt->targetNode, pkt->valve, pkt->command, pkt->messageId);
 
-        if (pkt->targetNode != nodeId) {
-          Serial.println("[RX] No es para este nodo.");
-        }
-        else if (!verifyHMAC(pkt)) {
-          Serial.println("[SEG] HMAC invalido, descartado.");
-        }
-        else if (pkt->messageId <= lastMessageId) {
-          Serial.printf("[SEG] ID %d repetido, descartado.\n", pkt->messageId);
-        }
-        else {
-          lastMessageId = pkt->messageId;
-          lastGwAck     = millis();  // Gateway respondió → conexión activa
-
-          if (pkt->command == 1 || pkt->command == 2) {
-            bool abrir = (pkt->command == 1);
-            if (displayOn) renderDisplay();  // Actualizar si visible
-            accionarValvula(pkt->valve, abrir);
-            sendStatus(STATUS_ACK, pkt->valve, pkt->messageId);
-            if (displayOn) renderDisplay();  // Refrescar estado válvulas
+          if (pkt->targetNode != nodeId) {
+            Serial.println("[RX] No es para este nodo.");
           }
-          else if (pkt->command == 3) {
-            // PING del gateway → ACK + actualizar timestamp conexión
-            sendStatus(STATUS_ACK, 0, pkt->messageId);
+          else if (!verifyHMAC(pkt)) {
+            Serial.println("[SEG] HMAC invalido, descartado.");
+          }
+          else if (pkt->messageId <= lastMessageId) {
+            Serial.printf("[SEG] ID %d repetido, descartado.\n", pkt->messageId);
+          }
+          else {
+            lastMessageId = pkt->messageId;
+            wakesSinceAck = 0;
+
+            if (pkt->command == 1 || pkt->command == 2) {
+              bool abrir = (pkt->command == 1);
+              if (displayOn) renderDisplay();
+              accionarValvula(pkt->valve, abrir);
+              sendStatus(STATUS_ACK, pkt->valve, pkt->messageId);
+              if (displayOn) renderDisplay();
+            }
+            else if (pkt->command == 3) {
+              sendStatus(STATUS_ACK, 0, pkt->messageId);
+            }
+          }
+        }
+        else if (buf[0] == PKT_SYNC) {
+          const LoRaSync* sync = (const LoRaSync*)buf;
+          if (verifyHMACSync(sync)) {
+            nightMode = (sync->hour < 8 || sync->hour >= 19);
+            Serial.printf("[SYNC] Hora %02dh → %s\n",
+              sync->hour, nightMode ? "NOCHE" : "DIA");
+          } else {
+            Serial.println("[SYNC] HMAC invalido, descartado.");
           }
         }
       }
@@ -689,7 +735,7 @@ void loop() {
     delay(10);
   }
 
-  // Apagar pantalla si llevan más de DISPLAY_ON_MS
+  // Auto-apagado display (transcurrido DISPLAY_ON_MS tras última interacción)
   if (displayOn && (millis() - displayOnStart) > DISPLAY_ON_MS) {
     sleepDisplay();
     currentPage = PAGE_INFO;

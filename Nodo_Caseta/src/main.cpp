@@ -19,8 +19,10 @@
 //
 // OPTOACOPLADOR DST-1R8P (NPN): LOW = sector activo
 // VCC-OUT del DST-1R8P → pin 3V3 del ESP32
+// RS485 VFD: GPIO6=RX (←MAX3485 TX), GPIO7=TX (→MAX3485 RX), GPIO45=DE
 // =============================================================================
 
+#include "secrets.h"  // must precede BlynkSimpleEsp32.h (defines BLYNK_TEMPLATE_ID etc.)
 #include <Arduino.h>
 #include <RadioLib.h>
 #include <ModbusRTU.h>
@@ -35,7 +37,6 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
-#include "secrets.h"
 
 // ============================================================
 // 1. PINES
@@ -51,22 +52,29 @@
 #define OLED_SDA    17
 #define OLED_SCL    18
 #define OLED_RST    21
+#define VEXT_PIN    36  // Heltec V3: LOW = OLED power ON
 #define SCREEN_W    128
 #define SCREEN_H    64
 
-// Optoacoplador DST-1R8P — sectores 4-8 del Agrónic
-#define OPTO_S4  2
-#define OPTO_S5  3
-#define OPTO_S6  4
-#define OPTO_S7  5
-#define OPTO_S8  6
+// Optoacoplador DST-1R8P — sectores 4-11 del Agrónic (8 pines cableados, 5 activos)
+// NPN: LOW = sector activo. Todos con INPUT_PULLUP.
+#define OPTO_S4   5
+#define OPTO_S5   4
+#define OPTO_S6   3
+#define OPTO_S7   2
+#define OPTO_S8   1
+#define OPTO_S9  38   // futuro
+#define OPTO_S10 39   // futuro
+#define OPTO_S11 40   // futuro
 
 #define NUM_SECTORS  5
 #define DEBOUNCE_MS  100
 
 // RS485 MAX3485 → VFD ABB ACQ80
-#define VFD_RX   47
-#define VFD_TX   48
+// GPIO 6 = ESP32 RX ← MAX3485 TX (lee respuestas del VFD)
+// GPIO 7 = ESP32 TX → MAX3485 RX (envía comandos Modbus al VFD)
+#define VFD_RX    6
+#define VFD_TX    7
 #define VFD_DE   45
 
 #define BUTTON_PIN  0
@@ -91,6 +99,7 @@ static const SectorMap SECTOR_MAP[NUM_SECTORS] = {
 #define PKT_STATUS   0xB2
 #define PKT_JOIN     0xC3
 #define PKT_REGISTER 0xD4
+#define PKT_SYNC     0xE5  // Gateway → todos los nodos: hora actual (modo día/noche)
 
 #define HMAC_KEY_LEN   16
 #define MAC_LEN         4
@@ -98,11 +107,17 @@ static const SectorMap SECTOR_MAP[NUM_SECTORS] = {
 #define MAX_RETRIES     3
 #define RETRY_MS        1000
 #define ACK_TIMEOUT_MS  4000
+// B2: cola persistente para cmds sector/menu. Cubre ciclo sleep del sector:
+//   día 30s  → deadline 65s reintenta 2 ventanas escucha
+//   noche 300s → no cubre; cmd se descarta pero próximo sector下次/reintentar manualmente
+#define CMD_RETRY_MS        2000   // separación entre reintentos
+#define CMD_RETRY_DEADLINE  65000   // ms total antes de declarar sin ACK
 
 struct __attribute__((packed)) LoRaPacket  { uint8_t t; uint8_t node; uint8_t valve; uint8_t cmd; uint32_t id; uint8_t mac[4]; };
 struct __attribute__((packed)) LoRaStatus  { uint8_t t; uint8_t from; uint8_t type; uint8_t detail; uint32_t id; };
 struct __attribute__((packed)) LoRaJoin    { uint8_t t; uint32_t chipId; uint8_t mac[4]; };
 struct __attribute__((packed)) LoRaRegister{ uint8_t t; uint32_t chipId; uint8_t assignedId; uint8_t mac[4]; };
+struct __attribute__((packed)) LoRaSync    { uint8_t t; uint8_t hour; uint8_t mac[4]; };  // 6 bytes
 
 // ============================================================
 // 4. NODOS
@@ -124,13 +139,16 @@ volatile uint8_t registeredCount = 0;
 #define REG_FREQ  3
 #define REG_CURR  4
 
-#define VP_FREQ   V0
-#define VP_CURR   V1
-#define VP_STATUS V2
-#define VP_TEMP   V3
-#define VP_N1     V4
-#define VP_N2     V5
-#define VP_N3     V6
+#define VP_FREQ        V0
+#define VP_CURR        V1
+#define VP_STATUS      V2
+#define VP_TEMP        V3
+// Nodos 1-8: V4-V11. Widget LED. 255=ON (con color), 0=OFF.
+// Color verde #23C48E = OK, rojo #D3435C = caído/fallo.
+#define VP_VALVE_TIMER V12  // Slider: minutos apertura manual (1-120)
+// Válvulas: V13=N1V1, V14=N1V2, V15=N2V1, ..., V27=N8V1, V28=N8V2
+// Widget Switch (no Button): envía 1=ABRIR, 0=CERRAR.
+static inline int valveVpin(uint8_t n, uint8_t v) { return 12 + (n-1)*2 + (v-1); }
 
 // ============================================================
 // 6. DISPLAY — MÁQUINA DE ESTADOS
@@ -171,6 +189,33 @@ unsigned long lastBlynkPush  = 0;
 unsigned long lastHealthPush = 0;
 unsigned long lastTimeout    = 0;
 
+// Control manual válvulas desde Blynk
+bool          valveBlynkOpen[MAX_NODES + 1][3]  = {};   // [node][valve 1-2] estado confirmado (ACK)
+unsigned long manualCloseAtMs[MAX_NODES + 1][3] = {};   // 0=sin timer activo
+volatile uint8_t manualTimerMin = 30;                   // minutos, desde VP_VALVE_TIMER
+volatile bool valveBlynkDirty   = false;                // señal taskRealTime → taskConnectivity
+
+struct ManualCmd {
+  bool     active;
+  uint8_t  node, valve, cmd;   // cmd: 1=ABRIR 2=CERRAR
+  uint32_t deadline;    // millis() límite reintentos (~65s)
+  uint32_t lastTryMs;   // millis() último intento
+  uint32_t durationMs;  // sólo para ABRIR: ms que queda abierta
+};
+ManualCmd pendingManual = {};
+
+// B2: cola persistente para cmds sector Agrónic + menú PRG.
+// msgId se fija en el encolar → sector dedupe por lastMessageId (idempotente).
+// Sólo un cmd activo; nuevo cmd sobreescribe (aceptado: opto debounce + manual serialized).
+struct CmdRetry {
+  bool     active;
+  uint8_t  node, valve, cmd;
+  uint32_t msgId;
+  uint32_t deadline;
+  uint32_t lastTryMs;
+};
+CmdRetry pendingCmd = {};
+
 uint32_t          msgCounter = 0;
 volatile bool     gwRxFlag   = false;
 
@@ -181,6 +226,7 @@ QueueHandle_t     cmdQueue;
 SemaphoreHandle_t displayMutex;
 SemaphoreHandle_t radioMutex;
 SemaphoreHandle_t nodesMutex;
+SemaphoreHandle_t manualMutex;
 
 // ============================================================
 // 9. OBJETOS HARDWARE
@@ -225,6 +271,29 @@ bool verifyJoin(const LoRaJoin* j) {
 }
 
 // ============================================================
+// 11b. SINCRONIZACIÓN HORARIA — PKT_SYNC
+// ============================================================
+static bool isNightHour(int h) { return h < 8 || h >= 19; }
+
+// Envía PKT_SYNC a todos los nodos de campo (broadcast sin dirección).
+// Llamar desde taskConnectivity con radioMutex disponible.
+void sendSyncToAll(uint8_t hour) {
+  LoRaSync s;
+  s.t    = PKT_SYNC;
+  s.hour = hour;
+  uint8_t d[2] = {s.t, s.hour};
+  _hmac(d, 2, s.mac);
+
+  if (xSemaphoreTake(radioMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+    radio.transmit((uint8_t*)&s, sizeof(s));
+    radio.startReceive();
+    xSemaphoreGive(radioMutex);
+  }
+  Serial.printf("[SYNC] Hora %02dh → nodos (%s)\n",
+    hour, isNightHour(hour) ? "NOCHE" : "DIA");
+}
+
+// ============================================================
 // 12. ALERTAS — LOG CIRCULAR
 // ============================================================
 void pushAlert(const char* msg) {
@@ -239,6 +308,69 @@ void pushAlert(const char* msg) {
 }
 
 // ============================================================
+// 12b. CONTROL MANUAL VÁLVULAS — BLYNK
+// ============================================================
+void pushValveStates() {
+  if (!Blynk.connected()) return;
+  for (uint8_t n = 1; n <= MAX_NODES; n++) {
+    for (uint8_t v = 1; v <= 2; v++) {
+      int vpin = valveVpin(n, v);
+      if (n > registeredCount) {
+        Blynk.virtualWrite(vpin, 0);
+        continue;
+      }
+      bool open = valveBlynkOpen[n][v];
+      char lbl[20];
+      Blynk.virtualWrite(vpin, open ? 1 : 0);
+      if (open && manualCloseAtMs[n][v] > millis()) {
+        uint32_t minLeft = (manualCloseAtMs[n][v] - millis()) / 60000UL + 1;
+        snprintf(lbl, sizeof(lbl), "N%d-V%d %dmin", n, v, (int)minLeft);
+        Blynk.setProperty(vpin, "color", "#23C48E");
+      } else if (open) {
+        snprintf(lbl, sizeof(lbl), "N%d-V%d ABIERTO", n, v);
+        Blynk.setProperty(vpin, "color", "#23C48E");
+      } else {
+        snprintf(lbl, sizeof(lbl), "N%d-V%d cerrado", n, v);
+        Blynk.setProperty(vpin, "color", "#808080");
+      }
+      Blynk.setProperty(vpin, "label", lbl);
+    }
+  }
+}
+
+void handleValveBlynk(uint8_t n, uint8_t v, int val) {
+  if (n < 1 || n > MAX_NODES || v < 1 || v > 2) return;
+  bool open  = (val == 1);
+  uint8_t cmd = open ? 1 : 2;
+  if (!open) manualCloseAtMs[n][v] = 0;
+  if (xSemaphoreTake(manualMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    pendingManual = {true, n, v, cmd, millis() + 65000UL, 0,
+                     open ? (uint32_t)manualTimerMin * 60000UL : 0};
+    xSemaphoreGive(manualMutex);
+  }
+  Serial.printf("[BLYNK] N%d-V%d %s timer=%dmin\n", n, v,
+    open ? "ABRIR" : "CERRAR", (int)manualTimerMin);
+}
+
+BLYNK_WRITE(V12)  { manualTimerMin = (uint8_t)constrain(param.asInt(), 1, 120); }
+BLYNK_WRITE(V13)  { handleValveBlynk(1,1,param.asInt()); }
+BLYNK_WRITE(V14)  { handleValveBlynk(1,2,param.asInt()); }
+BLYNK_WRITE(V15)  { handleValveBlynk(2,1,param.asInt()); }
+BLYNK_WRITE(V16)  { handleValveBlynk(2,2,param.asInt()); }
+BLYNK_WRITE(V17)  { handleValveBlynk(3,1,param.asInt()); }
+BLYNK_WRITE(V18)  { handleValveBlynk(3,2,param.asInt()); }
+BLYNK_WRITE(V19)  { handleValveBlynk(4,1,param.asInt()); }
+BLYNK_WRITE(V20)  { handleValveBlynk(4,2,param.asInt()); }
+BLYNK_WRITE(V21)  { handleValveBlynk(5,1,param.asInt()); }
+BLYNK_WRITE(V22)  { handleValveBlynk(5,2,param.asInt()); }
+BLYNK_WRITE(V23)  { handleValveBlynk(6,1,param.asInt()); }
+BLYNK_WRITE(V24)  { handleValveBlynk(6,2,param.asInt()); }
+BLYNK_WRITE(V25)  { handleValveBlynk(7,1,param.asInt()); }
+BLYNK_WRITE(V26)  { handleValveBlynk(7,2,param.asInt()); }
+BLYNK_WRITE(V27)  { handleValveBlynk(8,1,param.asInt()); }
+BLYNK_WRITE(V28)  { handleValveBlynk(8,2,param.asInt()); }
+
+// ============================================================
 // 13. DISPLAY — SISTEMA COMPLETO
 // ============================================================
 static DisplayPage  currentPage      = PAGE_NODES;
@@ -249,12 +381,23 @@ static unsigned long carouselLastTick = 0;
 static bool         inManualMenu     = false;
 static uint8_t      manualCursor     = 0;   // sector seleccionado (0..NUM_SECTORS-1)
 
-// Helper: imprime línea con truncado a 21 chars (ancho pantalla a size 1)
+// Portrait 64×128: ~10 chars/línea a size 1, ~5 chars a size 2.
+// dispLine: size 1, row × 8 px.
 void dispLine(uint8_t row, const char* fmt, ...) {
-  char buf[24];
+  char buf[12];
   va_list args; va_start(args, fmt); vsnprintf(buf, sizeof(buf), fmt, args); va_end(args);
+  display.setTextSize(1);
   display.setCursor(0, row * 8);
   display.print(buf);
+}
+// dispBig: size 2 (12×16 px/char), y en píxeles absolutos.
+void dispBig(uint8_t y_px, const char* fmt, ...) {
+  char buf[7];
+  va_list args; va_start(args, fmt); vsnprintf(buf, sizeof(buf), fmt, args); va_end(args);
+  display.setTextSize(2);
+  display.setCursor(0, y_px);
+  display.print(buf);
+  display.setTextSize(1);
 }
 
 // Devuelve true si algún sector está activo
@@ -274,7 +417,10 @@ void displaySleep() {
   display.ssd1306_command(SSD1306_DISPLAYOFF);
 }
 
-// Pantalla 1 — Nodos y health
+// Pantalla 1 — Nodos y health (portrait 64×128)
+// Header s1 (3 líneas) + nodos s2 (16px cada uno, espaciado 20px)
+// Estado s2: "N1:OK" "N3:FL" "N8:X " — máx 5 chars × 12px = 60px ✓
+// Hasta 5 nodos visibles; carrusel si hay más.
 void renderPageNodes() {
   uint8_t count;
   if (xSemaphoreTake(nodesMutex, 5) == pdTRUE) {
@@ -282,68 +428,84 @@ void renderPageNodes() {
     xSemaphoreGive(nodesMutex);
   } else { count = registeredCount; }
 
-  dispLine(0, "=NODOS  %d/%d=", count, MAX_NODES);
-  float espTemp = temperatureRead();
-  dispLine(1, "GW %.0fC W:%s B:%s", espTemp,
-    WiFi.isConnected() ? "Y" : "N", Blynk.connected() ? "Y" : "N");
+  dispLine(0, "NODOS%d/%d", count, MAX_NODES);
+  dispLine(1, "W:%s B:%s", WiFi.isConnected() ? "Y" : "N", Blynk.connected() ? "Y" : "N");
+  dispLine(2, "T:%.0fC", temperatureRead());
 
-  // Hasta 6 nodos visibles; si hay más, el carrusel desplaza
-  uint8_t visible = min((uint8_t)6, count);
-  uint8_t start   = (count > 6) ? (carouselOffset % (count - 5)) : 0;
+  uint8_t visible = min((uint8_t)5, count);
+  uint8_t start   = (count > 5) ? (carouselOffset % (count - 4)) : 0;
   for (uint8_t i = 0; i < visible; i++) {
     uint8_t n = start + i + 1;
     if (n > count) break;
-    const char* st = !nodes[n].alive ? "CAIDO" : nodes[n].fault ? "FALLO" : "OK   ";
-    unsigned long ago = (millis() - nodes[n].lastSeen) / 1000;
-    dispLine(i + 2, "N%d %s %lus", n, st, ago);
+    // "OK"=activo OK, "FL"=fallo, "X "=caído
+    const char* st = !nodes[n].alive ? "X " : nodes[n].fault ? "FL" : "OK";
+    dispBig(27 + i * 20, "N%d:%s", n, st);
   }
 }
 
-// Pantalla 2 — Alertas recientes
+// Pantalla 2 — Alertas recientes (portrait 64×128)
+// Contador s2 (grande) + 3 alertas más recientes en s1 (10 chars/línea), 2 líneas cada una.
+// Mensajes largos se parten en línea 1 (chars 0-9) y línea 2 (chars 10-19).
 void renderPageAlerts() {
-  dispLine(0, "=ALERTAS  %d=", alertLogCount);
-  if (alertLogCount == 0) { dispLine(1, "(sin alertas)"); return; }
-  uint8_t visible = min((uint8_t)7, alertLogCount);
-  uint8_t start   = (alertLogCount > 7) ? (carouselOffset % (alertLogCount - 6)) : 0;
-  for (uint8_t i = 0; i < visible; i++) {
-    uint8_t idx = (alertLogHead - alertLogCount + start + i + ALERT_LOG_SIZE) % ALERT_LOG_SIZE;
-    display.setCursor(0, (i + 1) * 8);
-    char buf[22]; strncpy(buf, alertLog[idx].msg, 21); buf[21] = '\0';
-    display.print(buf);
+  dispLine(0, "ALERTAS:");
+  if (alertLogCount == 0) {
+    dispBig(9, "0");
+    dispLine(5, "(ninguna)");
+    return;
+  }
+  dispBig(9, "%d", alertLogCount);  // Número grande — visible de lejos
+
+  uint8_t show = min((uint8_t)3, alertLogCount);
+  for (uint8_t i = 0; i < show; i++) {
+    // Índice: de más reciente (i=0) a más antiguo (i=show-1)
+    uint8_t idx = (alertLogHead - 1 - i + ALERT_LOG_SIZE) % ALERT_LOG_SIZE;
+    const char* msg = alertLog[idx].msg;
+    uint8_t baseRow = 4 + i * 4;   // Filas 4,5 | 8,9 | 12,13
+    dispLine(baseRow,     "%.10s", msg);
+    if (strlen(msg) > 10) dispLine(baseRow + 1, "%.10s", msg + 10);
   }
 }
 
-// Pantalla 3 — Sectores en riego
+// Pantalla 3 — Sectores en riego (portrait, size 2 por sector — lectura desde lejos)
+// Layout: 128px tall. Header s1 (8px) + 5×sector s2 (16px, espaciado 23px) + hint s1.
 void renderPageSectors() {
-  dispLine(0, "=SECTORES=");
+  dispLine(0, "SECTORES");
   for (uint8_t i = 0; i < NUM_SECTORS; i++) {
-    dispLine(i + 1, "S%d->N%dV%d %s", i + 4,
-      SECTOR_MAP[i].loraNode, SECTOR_MAP[i].loraValve,
-      sectorState[i] ? "RIEGO " : "parado");
+    // "S4:ON" o "S4:--" — 5 chars × 12px = 60px (cabe en 64px)
+    dispBig(9 + i * 23, "S%d:%s", i + 4, sectorState[i] ? "ON" : "--");
   }
-  dispLine(6, "");
-  dispLine(7, "[MANT]=prg largo");
+  dispLine(14, "LNG=MENU");
 }
 
-// Pantalla 4 — VFD info
+// Pantalla 4 — VFD info (portrait, mix size 1/2)
+// y=0  s1: título         (8px)
+// y=9  s2: RUN/STOP       (16px) → hasta y=25
+// y=26 s1: fallo          (8px)
+// y=35 s1: label freq     (8px)
+// y=44 s2: valor freq     (16px) → hasta y=60
+// y=61 s1: label corr     (8px)
+// y=70 s2: valor corr     (16px) → hasta y=86
+// y=96 s1: ID y poll      (8px)
 void renderPageVfd() {
-  dispLine(0, "=VFD ABB ACQ80=");
-  dispLine(1, "Estado: %s%s", vfdRunning ? "RUN" : "STOP", vfdFault ? " FALLO" : "");
-  dispLine(2, "Freq:  %.2f Hz", vfdRaw[1] / 100.0f);
-  dispLine(3, "Corr:  %.1f A",  vfdRaw[2] / 10.0f);
-  dispLine(4, "VFD ID:%d", VFD_ID);
-  dispLine(5, "Poll: 5s");
+  dispLine(0, "=VFD ABB=");
+  dispBig(9, vfdRunning ? "RUN" : "STOP");
+  dispLine(3, vfdFault ? "!!FALLO" : "");
+  dispLine(4, "Freq(Hz):");
+  dispBig(44, "%.1f", vfdRaw[1] / 100.0f);
+  dispLine(7, "Corr(A):");
+  dispBig(70, "%.1f", vfdRaw[2] / 10.0f);
+  dispLine(12, "ID:%d 5s", VFD_ID);
 }
 
-// Menú control manual — overlay
+// Menú control manual — overlay (portrait, size 1)
 void renderMenuManual() {
-  dispLine(0, "=CONTROL MANUAL=");
+  dispLine(0, "CTRL MAN");
   for (uint8_t i = 0; i < NUM_SECTORS; i++) {
     char arrow = (i == manualCursor) ? '>' : ' ';
-    dispLine(i + 1, "%cS%d %s", arrow, i + 4, sectorState[i] ? "ABIERTO" : "cerrado");
+    dispLine(i + 2, "%cS%d:%s", arrow, i + 4, sectorState[i] ? "ON" : "--");
   }
-  dispLine(6, "");
-  dispLine(7, "PRG=mover LNG=act");
+  dispLine(9,  "PRG=mover");
+  dispLine(10, "LNG=activ");
 }
 
 // Función principal de render — llamada desde taskDisplay
@@ -499,6 +661,9 @@ void processJoin(const LoRaJoin* j) {
   if (!verifyJoin(j)) { Serial.println("[JOIN] HMAC inv"); return; }
   for (uint8_t n = 1; n <= registeredCount; n++) {
     if (chipIdMap[n] == j->chipId) {
+      nodes[n].lastSeen = millis();  // nodo se reincorporó (reset o re-JOIN)
+      nodes[n].alive    = true;
+      nodes[n].fault    = false;
       LoRaRegister r = {PKT_REGISTER, j->chipId, n};
       hmacReg(&r, r.mac);
       if (xSemaphoreTake(radioMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
@@ -506,6 +671,7 @@ void processJoin(const LoRaJoin* j) {
         radio.startReceive();
         xSemaphoreGive(radioMutex);
       }
+      Serial.printf("[JOIN] N%d re-JOIN (0x%08X)\n", n, j->chipId);
       return;
     }
   }
@@ -529,51 +695,54 @@ void processJoin(const LoRaJoin* j) {
 }
 
 // ============================================================
-// 16. ENVÍO LORA CON REINTENTOS
+// 16. ENVÍO LORA — TX ÚNICA + ESPERA ACK
 // ============================================================
-bool sendCmd(uint8_t node, uint8_t valve, uint8_t cmd) {
-  msgCounter++;
-  prefs.putUInt("msgId", msgCounter);
-  LoRaPacket pkt = {PKT_COMMAND, node, valve, cmd, msgCounter};
+// Una TX + ventana ACK_TIMEOUT_MS. NO incrementa msgCounter (msgId fijado por caller
+// → idempotente entre reintentos). Procesa STATUS colaterales vía processStatus.
+bool txAndWaitAck(uint8_t node, uint8_t valve, uint8_t cmd, uint32_t msgId) {
+  LoRaPacket pkt = {PKT_COMMAND, node, valve, cmd, msgId};
   hmacPacket(&pkt, pkt.mac);
 
-  for (uint8_t attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    if (xSemaphoreTake(radioMutex, pdMS_TO_TICKS(1000)) != pdTRUE) continue;
-    radio.transmit((uint8_t*)&pkt, sizeof(pkt));
-    radio.startReceive();
-    xSemaphoreGive(radioMutex);
+  if (xSemaphoreTake(radioMutex, pdMS_TO_TICKS(1000)) != pdTRUE) return false;
+  radio.transmit((uint8_t*)&pkt, sizeof(pkt));
+  radio.startReceive();
+  xSemaphoreGive(radioMutex);
 
-    Serial.printf("[TX] %d/%d N%d V%d C%d ID%d\n",
-      attempt+1, MAX_RETRIES, node, valve, cmd, msgCounter);
+  Serial.printf("[TX] N%d V%d C%d ID%d\n", node, valve, cmd, msgId);
 
-    // Espera ACK
-    unsigned long t = millis();
-    while (millis() - t < ACK_TIMEOUT_MS) {
-      if (gwRxFlag) {
-        gwRxFlag = false;
-        uint8_t buf[MAX_PKT_LEN] = {0};
-        if (xSemaphoreTake(radioMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-          int st = radio.readData(buf, sizeof(buf));
-          radio.startReceive();
-          xSemaphoreGive(radioMutex);
-          if (st == RADIOLIB_ERR_NONE && buf[0] == PKT_STATUS) {
-            const LoRaStatus* s = (const LoRaStatus*)buf;
-            processStatus(s);
-            if (s->from == node && s->type == 0x00 && s->id == msgCounter) {
-              if (node <= registeredCount) nodes[node].fault = false;
-              return true;
-            }
+  unsigned long t = millis();
+  while (millis() - t < ACK_TIMEOUT_MS) {
+    if (gwRxFlag) {
+      gwRxFlag = false;
+      uint8_t buf[MAX_PKT_LEN] = {0};
+      if (xSemaphoreTake(radioMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        int st = radio.readData(buf, sizeof(buf));
+        radio.startReceive();
+        xSemaphoreGive(radioMutex);
+        if (st == RADIOLIB_ERR_NONE && buf[0] == PKT_STATUS) {
+          const LoRaStatus* s = (const LoRaStatus*)buf;
+          processStatus(s);
+          if (s->from == node && s->type == 0x00 && s->id == msgId) {
+            if (node <= registeredCount) nodes[node].fault = false;
+            return true;
           }
         }
       }
-      vTaskDelay(pdMS_TO_TICKS(10));
     }
-    vTaskDelay(pdMS_TO_TICKS(RETRY_MS));
+    vTaskDelay(pdMS_TO_TICKS(10));
   }
-
-  if (node <= registeredCount) nodes[node].fault = true;
-  pushAlert(("Sin ACK N" + String(node) + " V" + String(valve)).c_str());
   return false;
+}
+
+// Encolar cmd sector/menu → reintentado por taskRealTime hasta ACK o CMD_RETRY_DEADLINE.
+// msgId fijo entre reintentos → sector dedupe por lastMessageId (nodo descarta repite sin re-fire).
+bool sendCmd(uint8_t node, uint8_t valve, uint8_t cmd) {
+  msgCounter++;
+  prefs.putUInt("msgId", msgCounter);
+  pendingCmd = {true, node, valve, cmd, msgCounter, millis() + CMD_RETRY_DEADLINE, 0};
+  Serial.printf("[ENQ] N%d V%d C%d ID%d +%lus\n",
+    node, valve, cmd, msgCounter, CMD_RETRY_DEADLINE / 1000);
+  return true;
 }
 
 // ============================================================
@@ -599,7 +768,8 @@ void readOptocouplers() {
 void taskRealTime(void* pv) {
   // Configurar LoRa en este core
   SPI.begin(LORA_SCK, LORA_MISO, LORA_MOSI, LORA_NSS);
-  int st = radio.begin(868.0, 125.0, 9, 7, 18, 22, 8, 1.8, false);
+  // Sin antena: ≤5 dBm. Con antena FRP 3-5 dBi: 10 dBm (≤25 mW ERP, legal EU 868 MHz).
+  int st = radio.begin(868.0, 125.0, 9, 7, 18, 10, 8, 1.8, false);
   if (st != RADIOLIB_ERR_NONE) {
     Serial.printf("[ERROR] LoRa: %d\n", st);
     while (true) vTaskDelay(portMAX_DELAY);
@@ -636,12 +806,76 @@ void taskRealTime(void* pv) {
       }
     }
 
-    // 4. Procesar UN comando de la cola
+    // 4. Procesar UN comando de la cola (sector Agrónic)
     if (xQueueReceive(cmdQueue, &item, 0) == pdTRUE) {
       sendCmd(item.node, item.valve, item.cmd);
       if (xSemaphoreTake(radioMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         radio.startReceive();
         xSemaphoreGive(radioMutex);
+      }
+    }
+
+    // 4b. Comando manual Blynk — reintenta hasta 65s para pillar ventana sleep 30s
+    {
+      bool     mpActive = false;
+      uint8_t  mpNode = 0, mpValve = 0, mpCmd = 0;
+      uint32_t mpDeadline = 0, mpDuration = 0;
+
+      if (xSemaphoreTake(manualMutex, 0) == pdTRUE) {
+        if (pendingManual.active && millis() - pendingManual.lastTryMs > 2000) {
+          mpActive   = true;
+          mpNode     = pendingManual.node;
+          mpValve    = pendingManual.valve;
+          mpCmd      = pendingManual.cmd;
+          mpDeadline = pendingManual.deadline;
+          mpDuration = pendingManual.durationMs;
+          pendingManual.lastTryMs = millis();
+        }
+        xSemaphoreGive(manualMutex);
+      }
+
+      if (mpActive) {
+        // Nuevo msgId por intento — sector dedupe por lastMessageId (IDs ascenden).
+        msgCounter++;
+        prefs.putUInt("msgId", msgCounter);
+        bool ack = txAndWaitAck(mpNode, mpValve, mpCmd, msgCounter);
+        if (ack) {
+          valveBlynkOpen[mpNode][mpValve] = (mpCmd == 1);
+          if (mpCmd == 1 && mpDuration > 0) {
+            manualCloseAtMs[mpNode][mpValve] = millis() + mpDuration;
+          } else if (mpCmd == 2) {
+            manualCloseAtMs[mpNode][mpValve] = 0;
+          }
+          if (xSemaphoreTake(manualMutex, portMAX_DELAY) == pdTRUE) {
+            pendingManual.active = false;
+            xSemaphoreGive(manualMutex);
+          }
+          valveBlynkDirty = true;
+          Serial.printf("[BLYNK] N%d-V%d ACK OK\n", mpNode, mpValve);
+        } else if (millis() >= mpDeadline) {
+          if (xSemaphoreTake(manualMutex, portMAX_DELAY) == pdTRUE) {
+            pendingManual.active = false;
+            xSemaphoreGive(manualMutex);
+          }
+          pushAlert(("BLY N" + String(mpNode) + "V" + String(mpValve) + " sinACK").c_str());
+          valveBlynkDirty = true;  // pushValveStates revierte botón al estado real
+        }
+        // Si aún dentro de deadline y sin ACK → lastTryMs ya actualizado, reintentará
+      }
+    }
+
+    // 4c. Comando sector/menu — reintento persistente (msgId fijo, idempotente)
+    if (pendingCmd.active && millis() - pendingCmd.lastTryMs > CMD_RETRY_MS) {
+      pendingCmd.lastTryMs = millis();
+      bool ack = txAndWaitAck(pendingCmd.node, pendingCmd.valve, pendingCmd.cmd, pendingCmd.msgId);
+      if (ack) {
+        Serial.printf("[CMD] N%dV%d ACK OK\n", pendingCmd.node, pendingCmd.valve);
+        pendingCmd.active = false;
+      } else if (millis() >= pendingCmd.deadline) {
+        if (pendingCmd.node <= registeredCount) nodes[pendingCmd.node].fault = true;
+        pushAlert(("Sin ACK N" + String(pendingCmd.node) + "V" + String(pendingCmd.valve)).c_str());
+        Serial.printf("[CMD] N%dV%d sinACK deadline\n", pendingCmd.node, pendingCmd.valve);
+        pendingCmd.active = false;
       }
     }
 
@@ -698,7 +932,7 @@ void taskConnectivity(void* pv) {
   vfd.master();
   Serial.println("✓ Modbus RTU master VFD (Core 0)");
 
-  // WiFi + Blynk
+  // WiFi + Blynk + NTP
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   unsigned long wt = millis();
   while (!WiFi.isConnected() && millis() - wt < 15000) {
@@ -708,6 +942,9 @@ void taskConnectivity(void* pv) {
     Serial.printf("\n✓ WiFi (%s)\n", WiFi.localIP().toString().c_str());
     Blynk.config(BLYNK_TOKEN);
     Blynk.connect(5000);
+    // España: UTC+1 invierno (CET), UTC+2 verano (CEST)
+    configTime(3600, 3600, "pool.ntp.org", "time.nist.gov");
+    Serial.println("✓ NTP configurado");
   } else {
     Serial.println("\n[WARN] WiFi timeout — offline");
   }
@@ -733,16 +970,64 @@ void taskConnectivity(void* pv) {
       }
     }
 
-    // Push salud cada 60s
+    // Push salud + LEDs de nodos cada 60s
     if (millis() - lastHealthPush > 60000) {
       lastHealthPush = millis();
       if (Blynk.connected()) {
         Blynk.virtualWrite(VP_TEMP, temperatureRead());
-        for (uint8_t n = 1; n <= 3; n++) {
-          uint8_t st = (n > registeredCount) ? 0 : (nodes[n].fault ? 2 : (nodes[n].alive ? 1 : 2));
-          if (n==1) Blynk.virtualWrite(VP_N1, st);
-          else if (n==2) Blynk.virtualWrite(VP_N2, st);
-          else Blynk.virtualWrite(VP_N3, st);
+        // LEDs de nodos: V4-V11 (uno por nodo, máx 8)
+        for (uint8_t n = 1; n <= MAX_NODES; n++) {
+          int vpin = 3 + n;  // V4..V11
+          if (n > registeredCount) {
+            Blynk.virtualWrite(vpin, 0);           // Apagado: no registrado
+          } else if (!nodes[n].alive || nodes[n].fault) {
+            Blynk.setProperty(vpin, "color", "#D3435C");  // Rojo: caído/fallo
+            Blynk.virtualWrite(vpin, 255);
+          } else {
+            Blynk.setProperty(vpin, "color", "#23C48E");  // Verde: OK
+            Blynk.virtualWrite(vpin, 255);
+          }
+        }
+      }
+    }
+
+    // Auto-cierre válvulas manuales por timer expirado
+    for (uint8_t n = 1; n <= registeredCount; n++) {
+      for (uint8_t v = 1; v <= 2; v++) {
+        if (manualCloseAtMs[n][v] > 0 && millis() >= manualCloseAtMs[n][v]) {
+          manualCloseAtMs[n][v] = 0;
+          if (xSemaphoreTake(manualMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            if (!pendingManual.active) {
+              pendingManual = {true, n, v, 2, millis() + 65000UL, 0, 0};
+            }
+            xSemaphoreGive(manualMutex);
+          }
+          pushAlert(("Timer N" + String(n) + "V" + String(v) + " auto-cierre").c_str());
+        }
+      }
+    }
+
+    // Push estados válvulas Blynk (dirty flag o cada 30s)
+    {
+      static unsigned long lastValvePush = 0;
+      if (valveBlynkDirty || millis() - lastValvePush > 30000) {
+        lastValvePush   = millis();
+        valveBlynkDirty = false;
+        pushValveStates();
+      }
+    }
+
+    // Sincronización horaria con nodos de campo (modo día/noche)
+    {
+      static bool lastNightMode   = false;
+      static bool initialSyncDone = false;
+      struct tm t;
+      if (getLocalTime(&t, 0)) {
+        bool nightNow = isNightHour(t.tm_hour);
+        if (!initialSyncDone || nightNow != lastNightMode) {
+          lastNightMode   = nightNow;
+          initialSyncDone = true;
+          sendSyncToAll((uint8_t)t.tm_hour);
         }
       }
     }
@@ -756,12 +1041,17 @@ void taskConnectivity(void* pv) {
 // ============================================================
 void taskDisplay(void* pv) {
   // Inicializar OLED
+  pinMode(VEXT_PIN, OUTPUT);
+  digitalWrite(VEXT_PIN, LOW);  // enable OLED power rail
+  delay(10);
   Wire.begin(OLED_SDA, OLED_SCL);
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
     Serial.println("[WARN] Fallo OLED");
   }
   display.clearDisplay(); display.display();
+  display.setRotation(1);  // 90° CW — placa montada vertical → canvas 64×128 px
   Serial.println("✓ OLED OK (Core 0 taskDisplay)");
+  displayWake();  // show boot screen; auto-sleeps after DISPLAY_TIMEOUT_MS
 
   for (;;) {
     // Auto-apagado por inactividad (solo si no hay riego activo)
@@ -801,10 +1091,15 @@ void setup() {
   Serial.println("✓ GPIOs optoacoplador configurados");
 
   // FreeRTOS primitivas
-  cmdQueue    = xQueueCreate(16, sizeof(CmdItem));
+  cmdQueue     = xQueueCreate(16, sizeof(CmdItem));
   displayMutex = xSemaphoreCreateMutex();
   radioMutex   = xSemaphoreCreateMutex();
   nodesMutex   = xSemaphoreCreateMutex();
+  manualMutex  = xSemaphoreCreateMutex();
+  memset(&pendingManual,    0, sizeof(pendingManual));
+  memset(&pendingCmd,        0, sizeof(pendingCmd));
+  memset(valveBlynkOpen,    0, sizeof(valveBlynkOpen));
+  memset(manualCloseAtMs,   0, sizeof(manualCloseAtMs));
 
   // NVS
   prefs.begin("agro", false);
