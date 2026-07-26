@@ -414,6 +414,7 @@ void displayWake() {
 
 void displaySleep() {
   displayOn = false;
+  inManualMenu = false;  // salir del menú manual al apagar (no quedar atrapado)
   display.ssd1306_command(SSD1306_DISPLAYOFF);
 }
 
@@ -498,14 +499,42 @@ void renderPageVfd() {
 }
 
 // Menú control manual — overlay (portrait, size 1)
-void renderMenuManual() {
-  dispLine(0, "CTRL MAN");
+// Sólo muestra sectores cuyo nodo LoRa está registrado.
+// static visibleSectors[] rellenado por computeVisibleSectors().
+static uint8_t visibleSectors[NUM_SECTORS + 1];  // +1 margen
+static uint8_t visibleCount = 0;
+
+void computeVisibleSectors() {
+  visibleCount = 0;
+  uint8_t rc = registeredCount;  // lectura simple (trust eventual consistency)
   for (uint8_t i = 0; i < NUM_SECTORS; i++) {
-    char arrow = (i == manualCursor) ? '>' : ' ';
-    dispLine(i + 2, "%cS%d:%s", arrow, i + 4, sectorState[i] ? "ON" : "--");
+    if (SECTOR_MAP[i].loraNode <= rc) {
+      visibleSectors[visibleCount++] = i;
+    }
   }
-  dispLine(9,  "PRG=mover");
-  dispLine(10, "LNG=activ");
+}
+
+void renderMenuManual() {
+  computeVisibleSectors();
+  dispLine(0, "CTRL MAN");
+  if (visibleCount == 0) {
+    dispLine(2, "sin nodos");
+    dispLine(3, "registrad");
+    dispLine(5, "LNG=salir");
+    return;
+  }
+  for (uint8_t r = 0; r < visibleCount; r++) {
+    uint8_t i = visibleSectors[r];
+    uint8_t n = SECTOR_MAP[i].loraNode;
+    uint8_t v = SECTOR_MAP[i].loraValve;
+    char arrow = (r == manualCursor) ? '>' : ' ';
+    dispLine(r + 2, "%cS%d:%s", arrow, i + 4, valveBlynkOpen[n][v] ? "ON" : "--");
+  }
+  // Fila VOLVER (cursor == visibleCount)
+  char arrow = (manualCursor == visibleCount) ? '>' : ' ';
+  dispLine(visibleCount + 2, "%c[VOLVER]", arrow);
+  dispLine(visibleCount + 4, "PRG=mover");
+  dispLine(visibleCount + 5, "LNG=OK");
 }
 
 // Función principal de render — llamada desde taskDisplay
@@ -554,8 +583,10 @@ void btnShortPress() {
   displayLastActivity = millis();
 
   if (inManualMenu) {
-    // Avanzar cursor en el menú
-    manualCursor = (manualCursor + 1) % NUM_SECTORS;
+    // Avanzar cursor: [0..visibleCount-1] = sectores, visibleCount = [VOLVER]
+    computeVisibleSectors();
+    uint8_t span = visibleCount + 1;
+    if (span > 0) manualCursor = (manualCursor + 1) % span;
     return;
   }
   // Ciclar entre pantallas normales
@@ -567,14 +598,21 @@ void btnLongPress() {
   displayLastActivity = millis();
 
   if (inManualMenu) {
-    // Ejecutar apertura/cierre del sector seleccionado
-    uint8_t node  = SECTOR_MAP[manualCursor].loraNode;
-    uint8_t valve = SECTOR_MAP[manualCursor].loraValve;
-    uint8_t cmd   = sectorState[manualCursor] ? 2 : 1;  // toggle
+    computeVisibleSectors();
+    // Cursor en [VOLVER] → salir del menú
+    if (manualCursor == visibleCount || visibleCount == 0) {
+      inManualMenu = false;
+      currentPage = PAGE_SECTORS;
+      return;
+    }
+    uint8_t i     = visibleSectors[manualCursor];
+    uint8_t node  = SECTOR_MAP[i].loraNode;
+    uint8_t valve = SECTOR_MAP[i].loraValve;
+    uint8_t cmd   = valveBlynkOpen[node][valve] ? 2 : 1;  // toggle estado real
     CmdItem item  = {node, valve, cmd};
     xQueueSend(cmdQueue, &item, 0);
     Serial.printf("[MANUAL] S%d → N%dV%d %s\n",
-      manualCursor+4, node, valve, cmd==1 ? "ABRIR" : "CERRAR");
+      i+4, node, valve, cmd==1 ? "ABRIR" : "CERRAR");
     return;
   }
 
@@ -583,10 +621,6 @@ void btnLongPress() {
     inManualMenu  = true;
     manualCursor  = 0;
   }
-  // Long press en menú pero no en sector → salir
-  // (ya cubierto arriba: si inManualMenu → ejecuta, no sale)
-  // Para salir del menú: ciclar con short press hasta PAGE_SECTORS y volver a entrar
-  // O añadir double-press en el futuro
 }
 
 void processButton() {
@@ -637,15 +671,10 @@ void processStatus(const LoRaStatus* s) {
       bool    abrir  = (s->detail >> 4) & 0x01;
       Serial.printf("[MANUAL NODO] N%d V%d %s (iniciado en campo)\n",
         n, valve, abrir ? "ABIERTA" : "CERRADA");
-      // Actualizar estado del sector en pantalla del gateway
-      // El sector correspondiente se deduce del nodo y válvula
-      for (uint8_t i = 0; i < NUM_SECTORS; i++) {
-        if (SECTOR_MAP[i].loraNode == n && SECTOR_MAP[i].loraValve == valve) {
-          sectorState[i] = abrir;
-          prevSectorState[i] = abrir;  // Evitar re-envío del gateway
-          Serial.printf("[MANUAL NODO] → sector %d actualizado en gateway\n", i+4);
-          break;
-        }
+      // Actualizar estado ACK-confirmado de la válvula (no sectorState=opto)
+      if (n <= MAX_NODES && valve >= 1 && valve <= 2) {
+        valveBlynkOpen[n][valve] = abrir;
+        valveBlynkDirty = true;
       }
       char alertMsg[40];
       snprintf(alertMsg, sizeof(alertMsg), "N%d V%d %s (manual campo)",
@@ -737,6 +766,11 @@ bool txAndWaitAck(uint8_t node, uint8_t valve, uint8_t cmd, uint32_t msgId) {
 // Encolar cmd sector/menu → reintentado por taskRealTime hasta ACK o CMD_RETRY_DEADLINE.
 // msgId fijo entre reintentos → sector dedupe por lastMessageId (nodo descarta repite sin re-fire).
 bool sendCmd(uint8_t node, uint8_t valve, uint8_t cmd) {
+  if (node < 1 || node > registeredCount) {
+    pushAlert(("N" + String(node) + " no registrado").c_str());
+    Serial.printf("[ENQ] N%d NO REGISTRADO\n", node);
+    return false;
+  }
   msgCounter++;
   prefs.putUInt("msgId", msgCounter);
   pendingCmd = {true, node, valve, cmd, msgCounter, millis() + CMD_RETRY_DEADLINE, 0};
@@ -870,6 +904,8 @@ void taskRealTime(void* pv) {
       bool ack = txAndWaitAck(pendingCmd.node, pendingCmd.valve, pendingCmd.cmd, pendingCmd.msgId);
       if (ack) {
         Serial.printf("[CMD] N%dV%d ACK OK\n", pendingCmd.node, pendingCmd.valve);
+        valveBlynkOpen[pendingCmd.node][pendingCmd.valve] = (pendingCmd.cmd == 1);
+        valveBlynkDirty = true;
         pendingCmd.active = false;
       } else if (millis() >= pendingCmd.deadline) {
         if (pendingCmd.node <= registeredCount) nodes[pendingCmd.node].fault = true;
