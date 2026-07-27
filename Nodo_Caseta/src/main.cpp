@@ -92,6 +92,24 @@ static const SectorMap SECTOR_MAP[NUM_SECTORS] = {
   { OPTO_S8, 3, 1 },   // Sector 8 → Nodo 3 V-A
 };
 
+// Devuelve índice de SECTOR_MAP para ( nodo, válvula ) o -1 si no existe.
+static int8_t sectorIndexForNodeValve(uint8_t n, uint8_t v) {
+  for (uint8_t i = 0; i < NUM_SECTORS; i++)
+    if (SECTOR_MAP[i].loraNode == n && SECTOR_MAP[i].loraValve == v) return (int8_t)i;
+  return -1;
+}
+
+// Menú control manual / filtrado por nodo registrado — defs adelantadas (usadas por renderPageSectors).
+static uint8_t visibleSectors[NUM_SECTORS + 1];
+static uint8_t visibleCount = 0;
+extern volatile uint8_t registeredCount;
+void computeVisibleSectors() {
+  visibleCount = 0;
+  uint8_t rc = registeredCount;
+  for (uint8_t i = 0; i < NUM_SECTORS; i++)
+    if (SECTOR_MAP[i].loraNode <= rc) visibleSectors[visibleCount++] = i;
+}
+
 // ============================================================
 // 3. PROTOCOLO LORA
 // ============================================================
@@ -192,8 +210,12 @@ unsigned long lastTimeout    = 0;
 // Control manual válvulas desde Blynk
 bool          valveBlynkOpen[MAX_NODES + 1][3]  = {};   // [node][valve 1-2] estado confirmado (ACK)
 unsigned long manualCloseAtMs[MAX_NODES + 1][3] = {};   // 0=sin timer activo
+// Feedback de cmd fallido (sin ACK en 65s) en pantalla — muestra "FL" 5s y revierte.
+unsigned long sectorFailAtMs[NUM_SECTORS] = {0};
+#define SECTOR_FAIL_SHOW_MS 5000
 volatile uint8_t manualTimerMin = 30;                   // minutos, desde VP_VALVE_TIMER
 volatile bool valveBlynkDirty   = false;                // señal taskRealTime → taskConnectivity
+volatile bool displayWakeRequested = false;             // Blynk/taskRT pide despertar OLED
 
 struct ManualCmd {
   bool     active;
@@ -342,6 +364,7 @@ void handleValveBlynk(uint8_t n, uint8_t v, int val) {
   if (n < 1 || n > MAX_NODES || v < 1 || v > 2) return;
   bool open  = (val == 1);
   uint8_t cmd = open ? 1 : 2;
+  displayWakeRequested = true;
   if (!open) manualCloseAtMs[n][v] = 0;
   if (xSemaphoreTake(manualMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
     pendingManual = {true, n, v, cmd, millis() + 65000UL, 0,
@@ -468,12 +491,26 @@ void renderPageAlerts() {
 }
 
 // Pantalla 3 — Sectores en riego (portrait, size 2 por sector — lectura desde lejos)
-// Layout: 128px tall. Header s1 (8px) + 5×sector s2 (16px, espaciado 23px) + hint s1.
+// Sólo sectores con nodo registrado. Estados: ON (abierto) / >> (cmd en vuelo) / FL (falló 5s) / -- (cerrado).
 void renderPageSectors() {
+  computeVisibleSectors();
   dispLine(0, "SECTORES");
-  for (uint8_t i = 0; i < NUM_SECTORS; i++) {
-    // "S4:ON" o "S4:--" — 5 chars × 12px = 60px (cabe en 64px)
-    dispBig(9 + i * 23, "S%d:%s", i + 4, sectorState[i] ? "ON" : "--");
+  int8_t pi = pendingCmd.active ? sectorIndexForNodeValve(pendingCmd.node, pendingCmd.valve) : -1;
+  if (pi < 0 && pendingManual.active) pi = sectorIndexForNodeValve(pendingManual.node, pendingManual.valve);
+  for (uint8_t r = 0; r < visibleCount; r++) {
+    uint8_t i = visibleSectors[r];
+    uint8_t n = SECTOR_MAP[i].loraNode, v = SECTOR_MAP[i].loraValve;
+    const char* txt = "--";
+    if (sectorFailAtMs[i] > 0 && (millis() - sectorFailAtMs[i]) < SECTOR_FAIL_SHOW_MS) {
+      txt = "FL";
+    } else if ((pendingCmd.active || pendingManual.active) && pi == (int8_t)i) {
+      txt = ">>";
+    } else if (sectorState[i] || valveBlynkOpen[n][v]) {
+      txt = "ON";
+    }
+    if (sectorFailAtMs[i] > 0 && (millis() - sectorFailAtMs[i]) >= SECTOR_FAIL_SHOW_MS)
+      sectorFailAtMs[i] = 0;
+    dispBig(9 + r * 23, "S%d:%s", i + 4, txt);
   }
   dispLine(14, "LNG=MENU");
 }
@@ -499,21 +536,6 @@ void renderPageVfd() {
 }
 
 // Menú control manual — overlay (portrait, size 1)
-// Sólo muestra sectores cuyo nodo LoRa está registrado.
-// static visibleSectors[] rellenado por computeVisibleSectors().
-static uint8_t visibleSectors[NUM_SECTORS + 1];  // +1 margen
-static uint8_t visibleCount = 0;
-
-void computeVisibleSectors() {
-  visibleCount = 0;
-  uint8_t rc = registeredCount;  // lectura simple (trust eventual consistency)
-  for (uint8_t i = 0; i < NUM_SECTORS; i++) {
-    if (SECTOR_MAP[i].loraNode <= rc) {
-      visibleSectors[visibleCount++] = i;
-    }
-  }
-}
-
 void renderMenuManual() {
   computeVisibleSectors();
   dispLine(0, "CTRL MAN");
@@ -523,12 +545,24 @@ void renderMenuManual() {
     dispLine(5, "LNG=salir");
     return;
   }
+  int8_t pi = pendingCmd.active ? sectorIndexForNodeValve(pendingCmd.node, pendingCmd.valve) : -1;
+  if (pi < 0 && pendingManual.active) pi = sectorIndexForNodeValve(pendingManual.node, pendingManual.valve);
   for (uint8_t r = 0; r < visibleCount; r++) {
     uint8_t i = visibleSectors[r];
     uint8_t n = SECTOR_MAP[i].loraNode;
     uint8_t v = SECTOR_MAP[i].loraValve;
     char arrow = (r == manualCursor) ? '>' : ' ';
-    dispLine(r + 2, "%cS%d:%s", arrow, i + 4, valveBlynkOpen[n][v] ? "ON" : "--");
+    const char* txt = "--";
+    if (sectorFailAtMs[i] > 0 && (millis() - sectorFailAtMs[i]) < SECTOR_FAIL_SHOW_MS) {
+      txt = "FL";
+    } else if ((pendingCmd.active || pendingManual.active) && pi == (int8_t)i) {
+      txt = ">>";
+    } else if (valveBlynkOpen[n][v]) {
+      txt = "ON";
+    }
+    if (sectorFailAtMs[i] > 0 && (millis() - sectorFailAtMs[i]) >= SECTOR_FAIL_SHOW_MS)
+      sectorFailAtMs[i] = 0;
+    dispLine(r + 2, "%cS%d:%s", arrow, i + 4, txt);
   }
   // Fila VOLVER (cursor == visibleCount)
   char arrow = (manualCursor == visibleCount) ? '>' : ' ';
@@ -776,6 +810,9 @@ bool sendCmd(uint8_t node, uint8_t valve, uint8_t cmd) {
   pendingCmd = {true, node, valve, cmd, msgCounter, millis() + CMD_RETRY_DEADLINE, 0};
   Serial.printf("[ENQ] N%d V%d C%d ID%d +%lus\n",
     node, valve, cmd, msgCounter, CMD_RETRY_DEADLINE / 1000);
+  // Mantener display encendido para mostrar indicador ">>" durante el envío
+  displayWakeRequested = true;
+  displayLastActivity = millis();
   return true;
 }
 
@@ -885,6 +922,7 @@ void taskRealTime(void* pv) {
             xSemaphoreGive(manualMutex);
           }
           valveBlynkDirty = true;
+          displayWakeRequested = true;
           Serial.printf("[BLYNK] N%d-V%d ACK OK\n", mpNode, mpValve);
         } else if (millis() >= mpDeadline) {
           if (xSemaphoreTake(manualMutex, portMAX_DELAY) == pdTRUE) {
@@ -892,7 +930,10 @@ void taskRealTime(void* pv) {
             xSemaphoreGive(manualMutex);
           }
           pushAlert(("BLY N" + String(mpNode) + "V" + String(mpValve) + " sinACK").c_str());
+          int8_t fi = sectorIndexForNodeValve(mpNode, mpValve);
+          if (fi >= 0) sectorFailAtMs[fi] = millis();
           valveBlynkDirty = true;  // pushValveStates revierte botón al estado real
+          displayWakeRequested = true;
         }
         // Si aún dentro de deadline y sin ACK → lastTryMs ya actualizado, reintentará
       }
@@ -906,11 +947,15 @@ void taskRealTime(void* pv) {
         Serial.printf("[CMD] N%dV%d ACK OK\n", pendingCmd.node, pendingCmd.valve);
         valveBlynkOpen[pendingCmd.node][pendingCmd.valve] = (pendingCmd.cmd == 1);
         valveBlynkDirty = true;
+        displayWakeRequested = true;
         pendingCmd.active = false;
       } else if (millis() >= pendingCmd.deadline) {
         if (pendingCmd.node <= registeredCount) nodes[pendingCmd.node].fault = true;
         pushAlert(("Sin ACK N" + String(pendingCmd.node) + "V" + String(pendingCmd.valve)).c_str());
         Serial.printf("[CMD] N%dV%d sinACK deadline\n", pendingCmd.node, pendingCmd.valve);
+        int8_t fi = sectorIndexForNodeValve(pendingCmd.node, pendingCmd.valve);
+        if (fi >= 0) sectorFailAtMs[fi] = millis();  // muestra "FL" 5s en pantalla
+        displayWakeRequested = true;
         pendingCmd.active = false;
       }
     }
@@ -1090,8 +1135,14 @@ void taskDisplay(void* pv) {
   displayWake();  // show boot screen; auto-sleeps after DISPLAY_TIMEOUT_MS
 
   for (;;) {
-    // Auto-apagado por inactividad (solo si no hay riego activo)
-    bool active = anySectorActive();
+    if (displayWakeRequested) {
+      displayWakeRequested = false;
+      if (!inManualMenu) currentPage = PAGE_SECTORS;
+      displayWake();
+    }
+
+    // Auto-apagado por inactividad (solo si no hay riego activo ni cmd en vuelo)
+    bool active = anySectorActive() || pendingCmd.active || pendingManual.active;
     if (active && !displayOn) displayWake();
     if (!active && displayOn &&
         (millis() - displayLastActivity) > DISPLAY_TIMEOUT_MS) {
