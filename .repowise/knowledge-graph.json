@@ -1,0 +1,1454 @@
+{
+  "version": "1.0.0",
+  "project": {
+    "name": "Agro-LoRa",
+    "is_monorepo": false,
+    "total_files": 8,
+    "entry_points": [
+      "Nodo_Caseta/src/main.cpp",
+      "Nodo_Caseta_Vacon/src/main.cpp",
+      "Nodo_Sector/src/main.cpp"
+    ],
+    "tech_stack": [],
+    "entry_candidates": [
+      "Nodo_Caseta/src/main.cpp",
+      "Nodo_Caseta_Vacon/src/main.cpp",
+      "Nodo_Sector/src/main.cpp"
+    ],
+    "graph_mode": "flow"
+  },
+  "nodes": [
+    {
+      "id": "file:.claude/CLAUDE.md",
+      "type": "document",
+      "filePath": ".claude/CLAUDE.md",
+      "language": "markdown",
+      "symbolCount": 0,
+      "lineCount": 164,
+      "complexity": "moderate",
+      "pagerank": 0.125,
+      "communityId": 0,
+      "tags": [],
+      "summary": "Repository instructions and context for AI coding agents."
+    },
+    {
+      "id": "file:.claude/settings.local.json",
+      "type": "config",
+      "filePath": ".claude/settings.local.json",
+      "language": "json",
+      "symbolCount": 0,
+      "lineCount": 31,
+      "complexity": "simple",
+      "pagerank": 0.125,
+      "communityId": 1,
+      "tags": [
+        "config"
+      ],
+      "summary": "Configuration file: settings.local.json."
+    },
+    {
+      "id": "file:.github/workflows/build.yml",
+      "type": "pipeline",
+      "filePath": ".github/workflows/build.yml",
+      "language": "yaml",
+      "symbolCount": 0,
+      "lineCount": 24,
+      "complexity": "simple",
+      "pagerank": 0.125,
+      "communityId": 2,
+      "tags": [
+        "config",
+        "ci"
+      ],
+      "summary": "GitHub Actions CI/CD workflow definition."
+    },
+    {
+      "id": "file:.mcp.json",
+      "type": "config",
+      "filePath": ".mcp.json",
+      "language": "json",
+      "symbolCount": 0,
+      "lineCount": 8,
+      "complexity": "simple",
+      "pagerank": 0.125,
+      "communityId": 3,
+      "tags": [
+        "config"
+      ],
+      "summary": "Configuration file: .mcp.json."
+    },
+    {
+      "id": "file:Nodo_Caseta/src/main.cpp",
+      "type": "file",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "language": "cpp",
+      "symbolCount": 119,
+      "lineCount": 983,
+      "complexity": "complex",
+      "pagerank": 0.125,
+      "communityId": 4,
+      "tags": [
+        "entry_point"
+      ],
+      "summary": "Application module main defining SectorMap, LoRaPacket, LoRaStatus.",
+      "primaryOwner": "Nicol\u00e1s Sela"
+    },
+    {
+      "id": "file:Nodo_Caseta_Vacon/src/main.cpp",
+      "type": "file",
+      "filePath": "Nodo_Caseta_Vacon/src/main.cpp",
+      "language": "cpp",
+      "symbolCount": 67,
+      "lineCount": 605,
+      "complexity": "complex",
+      "pagerank": 0.125,
+      "communityId": 5,
+      "tags": [
+        "entry_point"
+      ],
+      "summary": "Application module main defining LoRaPacket, LoRaStatus, LoRaJoin.",
+      "primaryOwner": "Nicol\u00e1s Sela"
+    },
+    {
+      "id": "file:Nodo_Sector/src/main.cpp",
+      "type": "file",
+      "filePath": "Nodo_Sector/src/main.cpp",
+      "language": "cpp",
+      "symbolCount": 76,
+      "lineCount": 607,
+      "complexity": "complex",
+      "pagerank": 0.125,
+      "communityId": 6,
+      "tags": [
+        "entry_point"
+      ],
+      "summary": "Application module main defining LoRaPacket, LoRaStatus, LoRaJoin.",
+      "primaryOwner": "Nicol\u00e1s Sela"
+    },
+    {
+      "id": "file:README.md",
+      "type": "document",
+      "filePath": "README.md",
+      "language": "markdown",
+      "symbolCount": 0,
+      "lineCount": 685,
+      "complexity": "complex",
+      "pagerank": 0.125,
+      "communityId": 7,
+      "tags": [],
+      "summary": "Project overview and entry point for new readers."
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:BLYNK_WRITE",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "BLYNK_WRITE",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:_hmac",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "_hmac",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:anySectorActive",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "anySectorActive",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:btnLongPress",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "btnLongPress",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:btnShortPress",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "btnShortPress",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:dispBig",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "dispBig",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:dispLine",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "dispLine",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:displaySleep",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "displaySleep",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:displayWake",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "displayWake",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:gwSetFlag",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "gwSetFlag",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:handleValveBlynk",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "handleValveBlynk",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:hmacJoin",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "hmacJoin",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:hmacPacket",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "hmacPacket",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:hmacReg",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "hmacReg",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:isNightHour",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "isNightHour",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:loop",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "loop",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:processButton",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "processButton",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:processJoin",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "processJoin",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:processStatus",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "processStatus",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:pushAlert",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "pushAlert",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:pushValveStates",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "pushValveStates",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:readOptocouplers",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "readOptocouplers",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:renderDisplay",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "renderDisplay",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:renderMenuManual",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "renderMenuManual",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:renderPageAlerts",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "renderPageAlerts",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:renderPageNodes",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "renderPageNodes",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:renderPageSectors",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "renderPageSectors",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:renderPageVfd",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "renderPageVfd",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:sendCmd",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "sendCmd",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:sendSyncToAll",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "sendSyncToAll",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:setup",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "setup",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:taskConnectivity",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "taskConnectivity",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:taskDisplay",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "taskDisplay",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:taskRealTime",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "taskRealTime",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:valveVpin",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "valveVpin",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:verifyJoin",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "verifyJoin",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta/src/main.cpp:vfdReadCb",
+      "type": "function",
+      "filePath": "Nodo_Caseta/src/main.cpp",
+      "name": "vfdReadCb",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta_Vacon/src/main.cpp:checkNodeTimeouts",
+      "type": "function",
+      "filePath": "Nodo_Caseta_Vacon/src/main.cpp",
+      "name": "checkNodeTimeouts",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta_Vacon/src/main.cpp:computeHMAC",
+      "type": "function",
+      "filePath": "Nodo_Caseta_Vacon/src/main.cpp",
+      "name": "computeHMAC",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta_Vacon/src/main.cpp:computeHMACJoin",
+      "type": "function",
+      "filePath": "Nodo_Caseta_Vacon/src/main.cpp",
+      "name": "computeHMACJoin",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta_Vacon/src/main.cpp:computeHMACRegister",
+      "type": "function",
+      "filePath": "Nodo_Caseta_Vacon/src/main.cpp",
+      "name": "computeHMACRegister",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta_Vacon/src/main.cpp:gwSetFlag",
+      "type": "function",
+      "filePath": "Nodo_Caseta_Vacon/src/main.cpp",
+      "name": "gwSetFlag",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta_Vacon/src/main.cpp:loop",
+      "type": "function",
+      "filePath": "Nodo_Caseta_Vacon/src/main.cpp",
+      "name": "loop",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta_Vacon/src/main.cpp:processJoin",
+      "type": "function",
+      "filePath": "Nodo_Caseta_Vacon/src/main.cpp",
+      "name": "processJoin",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta_Vacon/src/main.cpp:processNodeStatus",
+      "type": "function",
+      "filePath": "Nodo_Caseta_Vacon/src/main.cpp",
+      "name": "processNodeStatus",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta_Vacon/src/main.cpp:sendLoRaCommand",
+      "type": "function",
+      "filePath": "Nodo_Caseta_Vacon/src/main.cpp",
+      "name": "sendLoRaCommand",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta_Vacon/src/main.cpp:setup",
+      "type": "function",
+      "filePath": "Nodo_Caseta_Vacon/src/main.cpp",
+      "name": "setup",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta_Vacon/src/main.cpp:updateDisplay",
+      "type": "function",
+      "filePath": "Nodo_Caseta_Vacon/src/main.cpp",
+      "name": "updateDisplay",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta_Vacon/src/main.cpp:updateModbusHealth",
+      "type": "function",
+      "filePath": "Nodo_Caseta_Vacon/src/main.cpp",
+      "name": "updateModbusHealth",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta_Vacon/src/main.cpp:verifyHMACJoin",
+      "type": "function",
+      "filePath": "Nodo_Caseta_Vacon/src/main.cpp",
+      "name": "verifyHMACJoin",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta_Vacon/src/main.cpp:vfdReadCb",
+      "type": "function",
+      "filePath": "Nodo_Caseta_Vacon/src/main.cpp",
+      "name": "vfdReadCb",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Caseta_Vacon/src/main.cpp:waitForAck",
+      "type": "function",
+      "filePath": "Nodo_Caseta_Vacon/src/main.cpp",
+      "name": "waitForAck",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Sector/src/main.cpp:accionarValvula",
+      "type": "function",
+      "filePath": "Nodo_Sector/src/main.cpp",
+      "name": "accionarValvula",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Sector/src/main.cpp:accionarValvulaManual",
+      "type": "function",
+      "filePath": "Nodo_Sector/src/main.cpp",
+      "name": "accionarValvulaManual",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Sector/src/main.cpp:computeHMAC",
+      "type": "function",
+      "filePath": "Nodo_Sector/src/main.cpp",
+      "name": "computeHMAC",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Sector/src/main.cpp:computeHMACJoin",
+      "type": "function",
+      "filePath": "Nodo_Sector/src/main.cpp",
+      "name": "computeHMACJoin",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Sector/src/main.cpp:computeHMACRegister",
+      "type": "function",
+      "filePath": "Nodo_Sector/src/main.cpp",
+      "name": "computeHMACRegister",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Sector/src/main.cpp:dispBig",
+      "type": "function",
+      "filePath": "Nodo_Sector/src/main.cpp",
+      "name": "dispBig",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Sector/src/main.cpp:dispLine",
+      "type": "function",
+      "filePath": "Nodo_Sector/src/main.cpp",
+      "name": "dispLine",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Sector/src/main.cpp:gatewayConnected",
+      "type": "function",
+      "filePath": "Nodo_Sector/src/main.cpp",
+      "name": "gatewayConnected",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Sector/src/main.cpp:goToSleep",
+      "type": "function",
+      "filePath": "Nodo_Sector/src/main.cpp",
+      "name": "goToSleep",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Sector/src/main.cpp:loop",
+      "type": "function",
+      "filePath": "Nodo_Sector/src/main.cpp",
+      "name": "loop",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Sector/src/main.cpp:performJoin",
+      "type": "function",
+      "filePath": "Nodo_Sector/src/main.cpp",
+      "name": "performJoin",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Sector/src/main.cpp:processButton",
+      "type": "function",
+      "filePath": "Nodo_Sector/src/main.cpp",
+      "name": "processButton",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Sector/src/main.cpp:renderDisplay",
+      "type": "function",
+      "filePath": "Nodo_Sector/src/main.cpp",
+      "name": "renderDisplay",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Sector/src/main.cpp:renderPageInfo",
+      "type": "function",
+      "filePath": "Nodo_Sector/src/main.cpp",
+      "name": "renderPageInfo",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Sector/src/main.cpp:renderPageManual",
+      "type": "function",
+      "filePath": "Nodo_Sector/src/main.cpp",
+      "name": "renderPageManual",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Sector/src/main.cpp:sendStatus",
+      "type": "function",
+      "filePath": "Nodo_Sector/src/main.cpp",
+      "name": "sendStatus",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Sector/src/main.cpp:setFlag",
+      "type": "function",
+      "filePath": "Nodo_Sector/src/main.cpp",
+      "name": "setFlag",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Sector/src/main.cpp:setup",
+      "type": "function",
+      "filePath": "Nodo_Sector/src/main.cpp",
+      "name": "setup",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Sector/src/main.cpp:sleepDisplay",
+      "type": "function",
+      "filePath": "Nodo_Sector/src/main.cpp",
+      "name": "sleepDisplay",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Sector/src/main.cpp:verifyHMAC",
+      "type": "function",
+      "filePath": "Nodo_Sector/src/main.cpp",
+      "name": "verifyHMAC",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Sector/src/main.cpp:verifyHMACRegister",
+      "type": "function",
+      "filePath": "Nodo_Sector/src/main.cpp",
+      "name": "verifyHMACRegister",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Sector/src/main.cpp:verifyHMACSync",
+      "type": "function",
+      "filePath": "Nodo_Sector/src/main.cpp",
+      "name": "verifyHMACSync",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    },
+    {
+      "id": "function:Nodo_Sector/src/main.cpp:wakeDisplay",
+      "type": "function",
+      "filePath": "Nodo_Sector/src/main.cpp",
+      "name": "wakeDisplay",
+      "language": "cpp",
+      "tags": [],
+      "summary": ""
+    }
+  ],
+  "edges": [
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:BLYNK_WRITE",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:_hmac",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:anySectorActive",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:btnLongPress",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:btnShortPress",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:dispBig",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:dispLine",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:displaySleep",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:displayWake",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:gwSetFlag",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:handleValveBlynk",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:hmacJoin",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:hmacPacket",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:hmacReg",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:isNightHour",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:loop",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:processButton",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:processJoin",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:processStatus",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:pushAlert",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:pushValveStates",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:readOptocouplers",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:renderDisplay",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:renderMenuManual",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:renderPageAlerts",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:renderPageNodes",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:renderPageSectors",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:renderPageVfd",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:sendCmd",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:sendSyncToAll",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:setup",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:taskConnectivity",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:taskDisplay",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:taskRealTime",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:valveVpin",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:verifyJoin",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta/src/main.cpp",
+      "target": "function:Nodo_Caseta/src/main.cpp:vfdReadCb",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta_Vacon/src/main.cpp",
+      "target": "function:Nodo_Caseta_Vacon/src/main.cpp:checkNodeTimeouts",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta_Vacon/src/main.cpp",
+      "target": "function:Nodo_Caseta_Vacon/src/main.cpp:computeHMAC",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta_Vacon/src/main.cpp",
+      "target": "function:Nodo_Caseta_Vacon/src/main.cpp:computeHMACJoin",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta_Vacon/src/main.cpp",
+      "target": "function:Nodo_Caseta_Vacon/src/main.cpp:computeHMACRegister",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta_Vacon/src/main.cpp",
+      "target": "function:Nodo_Caseta_Vacon/src/main.cpp:gwSetFlag",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta_Vacon/src/main.cpp",
+      "target": "function:Nodo_Caseta_Vacon/src/main.cpp:loop",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta_Vacon/src/main.cpp",
+      "target": "function:Nodo_Caseta_Vacon/src/main.cpp:processJoin",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta_Vacon/src/main.cpp",
+      "target": "function:Nodo_Caseta_Vacon/src/main.cpp:processNodeStatus",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta_Vacon/src/main.cpp",
+      "target": "function:Nodo_Caseta_Vacon/src/main.cpp:sendLoRaCommand",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta_Vacon/src/main.cpp",
+      "target": "function:Nodo_Caseta_Vacon/src/main.cpp:setup",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta_Vacon/src/main.cpp",
+      "target": "function:Nodo_Caseta_Vacon/src/main.cpp:updateDisplay",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta_Vacon/src/main.cpp",
+      "target": "function:Nodo_Caseta_Vacon/src/main.cpp:updateModbusHealth",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta_Vacon/src/main.cpp",
+      "target": "function:Nodo_Caseta_Vacon/src/main.cpp:verifyHMACJoin",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta_Vacon/src/main.cpp",
+      "target": "function:Nodo_Caseta_Vacon/src/main.cpp:vfdReadCb",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Caseta_Vacon/src/main.cpp",
+      "target": "function:Nodo_Caseta_Vacon/src/main.cpp:waitForAck",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Sector/src/main.cpp",
+      "target": "function:Nodo_Sector/src/main.cpp:accionarValvula",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Sector/src/main.cpp",
+      "target": "function:Nodo_Sector/src/main.cpp:accionarValvulaManual",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Sector/src/main.cpp",
+      "target": "function:Nodo_Sector/src/main.cpp:computeHMAC",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Sector/src/main.cpp",
+      "target": "function:Nodo_Sector/src/main.cpp:computeHMACJoin",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Sector/src/main.cpp",
+      "target": "function:Nodo_Sector/src/main.cpp:computeHMACRegister",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Sector/src/main.cpp",
+      "target": "function:Nodo_Sector/src/main.cpp:dispBig",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Sector/src/main.cpp",
+      "target": "function:Nodo_Sector/src/main.cpp:dispLine",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Sector/src/main.cpp",
+      "target": "function:Nodo_Sector/src/main.cpp:gatewayConnected",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Sector/src/main.cpp",
+      "target": "function:Nodo_Sector/src/main.cpp:goToSleep",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Sector/src/main.cpp",
+      "target": "function:Nodo_Sector/src/main.cpp:loop",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Sector/src/main.cpp",
+      "target": "function:Nodo_Sector/src/main.cpp:performJoin",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Sector/src/main.cpp",
+      "target": "function:Nodo_Sector/src/main.cpp:processButton",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Sector/src/main.cpp",
+      "target": "function:Nodo_Sector/src/main.cpp:renderDisplay",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Sector/src/main.cpp",
+      "target": "function:Nodo_Sector/src/main.cpp:renderPageInfo",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Sector/src/main.cpp",
+      "target": "function:Nodo_Sector/src/main.cpp:renderPageManual",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Sector/src/main.cpp",
+      "target": "function:Nodo_Sector/src/main.cpp:sendStatus",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Sector/src/main.cpp",
+      "target": "function:Nodo_Sector/src/main.cpp:setFlag",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Sector/src/main.cpp",
+      "target": "function:Nodo_Sector/src/main.cpp:setup",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Sector/src/main.cpp",
+      "target": "function:Nodo_Sector/src/main.cpp:sleepDisplay",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Sector/src/main.cpp",
+      "target": "function:Nodo_Sector/src/main.cpp:verifyHMAC",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Sector/src/main.cpp",
+      "target": "function:Nodo_Sector/src/main.cpp:verifyHMACRegister",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Sector/src/main.cpp",
+      "target": "function:Nodo_Sector/src/main.cpp:verifyHMACSync",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    },
+    {
+      "source": "file:Nodo_Sector/src/main.cpp",
+      "target": "function:Nodo_Sector/src/main.cpp:wakeDisplay",
+      "type": "contains",
+      "direction": "forward",
+      "weight": 1.0
+    }
+  ],
+  "layers": [
+    {
+      "id": "layer:application",
+      "name": "Application",
+      "description": "",
+      "nodeIds": [
+        "file:.mcp.json",
+        "file:Nodo_Caseta/src/main.cpp",
+        "file:Nodo_Caseta_Vacon/src/main.cpp",
+        "file:Nodo_Sector/src/main.cpp",
+        "file:README.md"
+      ],
+      "display_order": 0,
+      "order_basis": "canonical"
+    },
+    {
+      "id": "layer:config",
+      "name": "Config",
+      "description": "",
+      "nodeIds": [
+        "file:.claude/CLAUDE.md",
+        "file:.claude/settings.local.json",
+        "file:.github/workflows/build.yml"
+      ],
+      "display_order": 1,
+      "order_basis": "canonical"
+    }
+  ],
+  "tour": [
+    {
+      "order": 1,
+      "target_path": "README.md",
+      "page_type": "repo_overview",
+      "title": "README.md",
+      "depth": 0,
+      "kind": "overview",
+      "reason": "Start here for the end-to-end picture before diving into the code.",
+      "layer_id": "layer:application"
+    },
+    {
+      "order": 2,
+      "target_path": "Nodo_Caseta/src/main.cpp",
+      "page_type": "file_page",
+      "title": "main.cpp",
+      "depth": 0,
+      "kind": "code",
+      "reason": "An entry point \u2014 execution and imports fan out from here.",
+      "layer_id": "layer:application"
+    },
+    {
+      "order": 3,
+      "target_path": "Nodo_Caseta_Vacon/src/main.cpp",
+      "page_type": "file_page",
+      "title": "main.cpp",
+      "depth": 0,
+      "kind": "code",
+      "reason": "An entry point \u2014 execution and imports fan out from here.",
+      "layer_id": "layer:application"
+    },
+    {
+      "order": 4,
+      "target_path": "Nodo_Sector/src/main.cpp",
+      "page_type": "file_page",
+      "title": "main.cpp",
+      "depth": 0,
+      "kind": "code",
+      "reason": "An entry point \u2014 execution and imports fan out from here.",
+      "layer_id": "layer:application"
+    },
+    {
+      "order": 5,
+      "target_path": ".github/workflows/build.yml",
+      "page_type": "infra_page",
+      "title": "build.yml",
+      "depth": 1,
+      "kind": "infra",
+      "reason": "How the system above is configured, built, or deployed.",
+      "layer_id": "layer:config"
+    }
+  ],
+  "modules": [
+    {
+      "id": "module:application",
+      "name": "Application",
+      "path": "",
+      "layerId": "layer:application",
+      "nodeIds": [
+        "file:.mcp.json",
+        "file:Nodo_Caseta/src/main.cpp",
+        "file:Nodo_Caseta_Vacon/src/main.cpp",
+        "file:Nodo_Sector/src/main.cpp",
+        "file:README.md"
+      ],
+      "wholeLayer": true,
+      "language": "cpp"
+    },
+    {
+      "id": "module:config",
+      "name": "Config",
+      "path": "",
+      "layerId": "layer:config",
+      "nodeIds": [
+        "file:.claude/CLAUDE.md",
+        "file:.claude/settings.local.json",
+        "file:.github/workflows/build.yml"
+      ],
+      "wholeLayer": true,
+      "language": "json"
+    }
+  ]
+}

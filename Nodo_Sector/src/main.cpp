@@ -44,12 +44,15 @@
 // 2. CONFIGURACIÓN DEL NODO
 // ==========================================
 #define MAX_NODES        8
-#define SLEEP_DAY_S      30    // Ciclo día: 8h-19h
+#define SLEEP_DAY_S      10    // Ciclo día: 8h-19h (latencia aprox. 0-10s)
 #define SLEEP_NIGHT_S   300    // Ciclo noche: 19h-8h (5 min)
-#define LISTEN_DAY_MS   3000   // Ventana escucha LoRa — día
+#define LISTEN_DAY_MS   2000   // Ventana escucha LoRa — día
 #define LISTEN_NIGHT_MS  500   // Ventana mínima — noche (irrigación inactiva)
-#define HB_EVERY_DAY     10   // Heartbeat cada 10 ciclos = 5 min (día)
+#define HB_EVERY_DAY     10   // Heartbeat cada 10 ciclos = ~2 min (día)
 #define HB_EVERY_NIGHT    2   // Heartbeat cada 2 ciclos = 10 min (noche, < 12 min timeout GW)
+#define SECTOR_DISABLE_DEEP_SLEEP 0  // TEST: 1=escucha continua, 0=producción batería
+#define LISTEN_AWAKE_MS  1000        // Ventana por ciclo sin deep sleep (latencia ~0-1s)
+#define HB_EVERY_AWAKE     60        // Heartbeat cada ~60s en modo escucha continua
 #define WDT_TIMEOUT_S    10
 #define JOIN_TIMEOUT_MS  8000
 // Compatibilidad con código que usa SLEEP_INTERVAL_S y LISTEN_WINDOW_MS
@@ -62,9 +65,9 @@
 #define BTN_LONG_MS      800
 
 // Ciclos de wakeup sin ACK del gateway antes de considerarlo caído.
-// Día:   24 ciclos × 30s  = 12 min (= HB_TIMEOUT gateway)
+// Día:   60 ciclos × ~12s = ~12 min (= HB_TIMEOUT gateway)
 // Noche:  3 ciclos × 300s = 15 min (> HB_TIMEOUT de 12 min)
-#define GW_CONN_MAX_WAKES_DAY    24
+#define GW_CONN_MAX_WAKES_DAY    60
 #define GW_CONN_MAX_WAKES_NIGHT   3
 
 // ==========================================
@@ -652,6 +655,9 @@ void setup() {
     valve1Open ? "ABT" : "CER",
     valve2Open ? "ABT" : "CER",
     wakeCount);
+#if SECTOR_DISABLE_DEEP_SLEEP
+  Serial.println("[TEST] Deep sleep desactivado: escucha continua");
+#endif
 }
 
 // ==========================================
@@ -663,6 +669,10 @@ void loop() {
 
   uint32_t listenMs = nightMode ? LISTEN_NIGHT_MS : LISTEN_DAY_MS;
   uint8_t  hbEvery  = nightMode ? HB_EVERY_NIGHT   : HB_EVERY_DAY;
+#if SECTOR_DISABLE_DEEP_SLEEP
+  listenMs = LISTEN_AWAKE_MS;
+  hbEvery  = HB_EVERY_AWAKE;
+#endif
 
   // Heartbeat periódico
   if (wakeCount % hbEvery == 0) {
@@ -741,5 +751,9 @@ void loop() {
     currentPage = PAGE_INFO;
   }
 
+#if SECTOR_DISABLE_DEEP_SLEEP
+  delay(10);
+#else
   goToSleep();
+#endif
 }

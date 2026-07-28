@@ -126,7 +126,7 @@ void computeVisibleSectors() {
 #define RETRY_MS        1000
 #define ACK_TIMEOUT_MS  4000
 // B2: cola persistente para cmds sector/menu. Cubre ciclo sleep del sector:
-//   día 30s  → deadline 65s reintenta 2 ventanas escucha
+//   día 10s  → deadline 65s cubre varias ventanas escucha
 //   noche 300s → no cubre; cmd se descarta pero próximo sector下次/reintentar manualmente
 #define CMD_RETRY_MS        2000   // separación entre reintentos
 #define CMD_RETRY_DEADLINE  65000   // ms total antes de declarar sin ACK
