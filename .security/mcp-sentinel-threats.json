@@ -1,0 +1,32 @@
+{
+  "last_scan": "2026-08-16T18:05:00Z",
+  "scan_count": 1,
+  "scanner": "mcp-sentinel v3.1.1",
+  "scan_scope": "user-level installs (~/.agents/skills, ~/.claude/skills, ~/.config/opencode/skills, ~/.claude/settings.json, ~/.config/opencode/opencode.json, project .mcp.json)",
+  "scan_caveats": "Local IOC sweep, coherence review, and source-integrity diff vs official GitHub tags performed. Per-item external threat-intel DB lookups (GitHub Advisory, vulnerablemcp.info, mcpscan.ai, Snyk) not performed this run.",
+  "inventory": [
+    {"name": "mcp-sentinel", "type": "skill", "source": "github.com/soy-rafa/claude-mcp-sentinel", "version": "3.1.1", "first_seen": "2026-08-16", "status": "clean", "findings": ["Upgraded from 2.0.0 (verified untampered vs official v2.0 tag; 2 local FP-reduction patches superseded by v3.1.1 field-scoped checks)", "Runtime hooks registered: PreToolUse + PostToolUse + SessionStart", "Integrity baseline set (sentinel-baseline.b64)", "Test suite 120/120"]},
+    {"name": "skills-bundle-marketing (.agents/skills, 50 items)", "type": "skill_set", "source": "local copies, provenance not embedded", "first_seen": "2026-08-16", "status": "clean", "findings": ["IOC domain sweep (giftshop.club, pastebin-style, exfil services, reverse shells): no hits", "No sensitive-path or env-var exfil patterns"]},
+    {"name": "skills-bundle-design (.claude/skills, 14 items)", "type": "skill_set", "source": "local copies", "first_seen": "2026-08-16", "status": "clean", "findings": ["IOC sweep clean; 'impeccable' contains benign ANTHROPIC_API_KEY references in code comments (documented env passthrough)"]},
+    {"name": "skills-bundle-opencode (.config/opencode/skills, 4 items)", "type": "skill_set", "source": "local copies", "first_seen": "2026-08-16", "status": "clean", "findings": ["IOC sweep clean"]},
+    {"name": "repowise", "type": "mcp_server", "source": "pip binary (local)", "status": "clean", "findings": []},
+    {"name": "pencil", "type": "mcp_server", "source": "local app binary (Pencil.app)", "status": "clean", "findings": ["disabled in opencode config"]},
+    {"name": "obsidian", "type": "mcp_server", "source": "remote https://127.0.0.1:27124 (localhost only)", "status": "warning", "findings": ["Bearer token was stored plaintext; REDACTED pending rotation. Rotation required to restore function."]},
+    {"name": "playwright", "type": "mcp_server", "source": "npx @playwright/mcp", "status": "clean", "findings": ["Was @latest (supply-chain risk); pinned to 0.0.79"]},
+    {"name": "ios-simulator", "type": "mcp_server", "source": "npx ios-simulator-mcp", "status": "clean", "findings": ["Was unpinned; pinned to 2.1.0"]},
+    {"name": "zai-mcp-server", "type": "mcp_server", "source": "npx @z_ai/mcp-server", "status": "warning", "findings": ["Was @latest; pinned to 0.1.4", "Z_AI_API_KEY was stored plaintext; REDACTED pending rotation. Rotation required to restore function."]},
+    {"name": "mobile-mcp", "type": "mcp_server", "source": "npx @mobilenext/mobile-mcp via bash wrapper", "status": "clean", "findings": ["Was @latest; pinned to 1.0.2", "Telemetry disabled via MOBILEMCP_DISABLE_TELEMETRY=1"]},
+    {"name": "google-pay-wallet-dev", "type": "mcp_server", "source": "remote https://paydeveloper.googleapis.com (official Google)", "status": "warning", "findings": ["OAuth clientSecret was stored plaintext; REDACTED pending rotation. Rotation required to restore function."]},
+    {"name": "easyeda-copilot", "type": "mcp_server", "source": "npx easyeda-copilot-mcp", "status": "clean", "findings": ["Was unpinned; pinned to 1.1.7"]},
+    {"name": "claude-hooks (ccnotifier, caveman, graphify, repowise-augment)", "type": "hooks", "source": "user-installed, reviewed individually", "status": "clean", "findings": ["All local; no exfil endpoints, no sensitive-path access. Sentinel hook registration preserved them."]},
+    {"name": "global-permissions", "type": "config", "source": "~/.claude/settings.json", "status": "clean", "findings": ["Removed blanket 'Bash(curl:*)' allow — curl commands now prompt"]}
+  ],
+  "known_threats": [],
+  "community_alerts": [],
+  "pending_user_actions": [
+    "Rotate Z.ai API key and paste new value into ~/.config/opencode/opencode.json (zai-mcp-server.environment.Z_AI_API_KEY)",
+    "Rotate Obsidian Local REST API bearer token and paste into opencode.json (obsidian.headers.Authorization)",
+    "Rotate Google OAuth client secret (Google Cloud Console) and paste into opencode.json (google-pay-wallet-dev.oauth.clientSecret)",
+    "Optionally delete backup dir ~/.agents/skills/mcp-sentinel.bak-v2.0-local once satisfied with v3.1.1"
+  ]
+}

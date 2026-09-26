@@ -30,15 +30,17 @@
 #define SCREEN_WIDTH  128
 #define SCREEN_HEIGHT 64
 
-// DRV8833 — pines GPIO 3-7 (cluster compacto, fácil de cablear)
+// DRV8833 — pines GPIO 2,4,5,6,7 (cluster compacto, fácil de cablear)
 // Canal A → Válvula 1 (solenoide latch Baccara 9V)
 #define PIN_AIN1       4   // AIN1: pulso ABRIR  V1
-#define PIN_AIN2       3   // AIN2: pulso CERRAR V1
+#define PIN_AIN2       2   // AIN2: pulso CERRAR V1 (GPIO3 era strap → GPIO2)
 // Canal B → Válvula 2
 #define PIN_BIN1       6   // BIN1: pulso ABRIR  V2
 #define PIN_BIN2       5   // BIN2: pulso CERRAR V2
 // Enable
-#define PIN_STBY      7   // STBY: LOW=standby, HIGH=activo
+#define PIN_STBY      7   // STBY/nSLEEP: LOW=standby, HIGH=activo
+// Boost MT3608 (10.2V) — GPIO47 (GPIO15/16 NO existen en headers Heltec V3)
+#define PIN_BOOST_EN  47  // HIGH=ON, 10k pulldown en placa (OFF al boot)
 
 // ==========================================
 // 2. CONFIGURACIÓN DEL NODO
@@ -370,6 +372,10 @@ void accionarValvula(uint8_t valve, bool abrir) {
 
   Serial.printf(">>> V%d %s <<<\n", valve, abrir ? "APERTURA" : "CIERRE");
 
+  // Pre-carga del reservorio (40mF) antes del pulso: MT3608 limita a ~0.5A
+  digitalWrite(PIN_BOOST_EN, HIGH);  // Boost ON → 10.2V
+  delay(1500);                       // ~1s carga + margen de regulación
+
   digitalWrite(PIN_STBY, HIGH);  // Activar driver DRV8833
   delay(1);
 
@@ -382,6 +388,8 @@ void accionarValvula(uint8_t valve, bool abrir) {
   digitalWrite(pinB, LOW);
   delay(1);
   digitalWrite(PIN_STBY, LOW);  // Standby → ahorro energía
+
+  digitalWrite(PIN_BOOST_EN, LOW);  // Boost OFF → Iq < 1µA (drenaje 0 batería)
 
   // Actualizar estado en RTC (persiste en deep sleep)
   if (valve == 1) valve1Open = abrir;
@@ -600,6 +608,7 @@ void setup() {
   pinMode(PIN_BIN1,  OUTPUT); digitalWrite(PIN_BIN1,  LOW);
   pinMode(PIN_BIN2,  OUTPUT); digitalWrite(PIN_BIN2,  LOW);
   pinMode(PIN_STBY, OUTPUT); digitalWrite(PIN_STBY, LOW);  // Standby → ahorro (se sube en accionarValvula)
+  pinMode(PIN_BOOST_EN, OUTPUT); digitalWrite(PIN_BOOST_EN, LOW);  // Boost OFF (10k pulldown en placa)
 
   // OLED: inicializar APAGADO (ahorrar batería)
   Wire.begin(OLED_SDA, OLED_SCL);
