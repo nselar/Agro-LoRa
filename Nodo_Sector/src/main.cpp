@@ -39,8 +39,17 @@
 #define PIN_BIN2       5   // BIN2: pulso CERRAR V2
 // Enable
 #define PIN_STBY      7   // STBY/nSLEEP: LOW=standby, HIGH=activo
+#define PIN_FAULT     3   // nFAULT DRV8833 (open-drain, pull-up R10 en placa): LOW=fallo
 // Boost MT3608 (10.2V) — GPIO47 (GPIO15/16 NO existen en headers Heltec V3)
 #define PIN_BOOST_EN  47  // HIGH=ON, 10k pulldown en placa (OFF al boot)
+
+// Diagnóstico nFAULT: 1 = imprime [DIAG] con nFAULT en cada etapa de accionarValvula()
+#define FAULT_DIAG 1
+
+// Batería (Heltec V3): divisor 390k/100k en GPIO1, habilitado con ADC_CTRL en LOW
+#define VBAT_ADC_PIN      1
+#define VBAT_ADC_CTRL     37
+#define VBAT_DIV_FACTOR   4.9f  // (390k + 100k) / 100k
 
 // ==========================================
 // 2. CONFIGURACIÓN DEL NODO
@@ -144,6 +153,7 @@ RTC_DATA_ATTR bool     valve2Open     = false;
 // Seguro en deep sleep: millis() se resetea pero wakesSinceAck no depende del tiempo.
 RTC_DATA_ATTR uint32_t wakesSinceAck = UINT32_MAX;
 RTC_DATA_ATTR bool     nightMode      = false;  // Actualizado por PKT_SYNC del gateway
+RTC_DATA_ATTR bool     driverFault    = false;  // nFAULT del DRV8833 visto en el último pulso
 
 // ==========================================
 // 6. OBJETOS GLOBALES
@@ -267,6 +277,18 @@ static void dispBig(uint8_t y_px, const char* fmt, ...) {
   display.setTextSize(1);
 }
 
+// Lectura de batería: el divisor del Heltec V3 solo conduce con ADC_CTRL en LOW.
+// Se devuelve a INPUT tras leer para no drenar la batería por el divisor.
+static float readBatteryV() {
+  pinMode(VBAT_ADC_CTRL, OUTPUT);
+  digitalWrite(VBAT_ADC_CTRL, LOW);
+  delay(5);  // asentar divisor
+  uint32_t mv = 0;
+  for (uint8_t i = 0; i < 8; i++) mv += analogReadMilliVolts(VBAT_ADC_PIN);
+  pinMode(VBAT_ADC_CTRL, INPUT);
+  return (mv / 8) * VBAT_DIV_FACTOR / 1000.0f;
+}
+
 // ==========================================
 // 11. DISPLAY — PANTALLA 1: INFO (portrait)
 // ==========================================
@@ -291,9 +313,7 @@ void renderPageInfo() {
   dispBig(26, "V1:%s", valve1Open ? "ON" : "--");
   dispBig(43, "V2:%s", valve2Open ? "ON" : "--");
 
-  int raw = analogRead(1);
-  float vBat = raw * (3.3f / 4095.0f) * 2.0f;
-  dispLine(7,  "Bat:%.2fV", vBat);
+  dispLine(7,  "Bat:%.2fV", readBatteryV());
   dispLine(8,  "T:%.0fC", temperatureRead());
   dispLine(9,  "C:%d", wakeCount);
   if (wakesSinceAck == UINT32_MAX) {
@@ -301,6 +321,7 @@ void renderPageInfo() {
   } else {
     dispLine(10, "ACK:%dW", wakesSinceAck);  // ciclos desde último ACK
   }
+  dispLine(11, "DRV:%s", driverFault ? "FALLO" : "ok");
   dispLine(14, "LNG=manual");
   dispLine(15, "PRG=pant");
 
@@ -372,24 +393,62 @@ void accionarValvula(uint8_t valve, bool abrir) {
 
   Serial.printf(">>> V%d %s <<<\n", valve, abrir ? "APERTURA" : "CIERRE");
 
+#if FAULT_DIAG
+  // Muestras de nFAULT (1=alto=OK, 0=bajo=fallo). Se imprimen al final para no alargar el pulso.
+  uint8_t fIdle, fBoost, fEnabled, fP1, fP10, fP30, fRel, fStby;
+  fIdle = digitalRead(PIN_FAULT);   // Driver en standby, boost OFF: debe ser 1 (pull-up R10)
+#endif
+
   // Pre-carga del reservorio (40mF) antes del pulso: MT3608 limita a ~0.5A
   digitalWrite(PIN_BOOST_EN, HIGH);  // Boost ON → 10.2V
   delay(1500);                       // ~1s carga + margen de regulación
+#if FAULT_DIAG
+  fBoost = digitalRead(PIN_FAULT);  // Boost ON, driver aún en standby
+#endif
 
   digitalWrite(PIN_STBY, HIGH);  // Activar driver DRV8833
   delay(1);
+#if FAULT_DIAG
+  fEnabled = digitalRead(PIN_FAULT);  // Driver activo, salidas en LOW (sin corriente)
+#endif
 
   if (abrir) { digitalWrite(pinA, HIGH); digitalWrite(pinB, LOW); }
   else       { digitalWrite(pinA, LOW);  digitalWrite(pinB, HIGH); }
 
-  delay(35);  // Pulso latch 35ms para Baccara 9V
+#if FAULT_DIAG
+  delay(1);  fP1  = digitalRead(PIN_FAULT);
+  delay(9);  fP10 = digitalRead(PIN_FAULT);
+  delay(19); fP30 = digitalRead(PIN_FAULT);
+  delay(5);  // Pulso latch total 35ms para Baccara 9V
+  driverFault = (fP30 == LOW);
+#else
+  delay(30);
+  // nFAULT LOW = sobrecorriente / térmico / UVLO del DRV8833. Muestrear con el pulso activo.
+  driverFault = (digitalRead(PIN_FAULT) == LOW);
+  delay(5);   // Pulso latch total 35ms para Baccara 9V
+#endif
 
   digitalWrite(pinA, LOW);
   digitalWrite(pinB, LOW);
   delay(1);
+#if FAULT_DIAG
+  fRel = digitalRead(PIN_FAULT);  // Salidas ya en LOW, driver aún activo
+#endif
   digitalWrite(PIN_STBY, LOW);  // Standby → ahorro energía
+#if FAULT_DIAG
+  delay(1);
+  fStby = digitalRead(PIN_FAULT);  // De vuelta en standby
+#endif
 
   digitalWrite(PIN_BOOST_EN, LOW);  // Boost OFF → Iq < 1µA (drenaje 0 batería)
+
+#if FAULT_DIAG
+  Serial.printf("[DIAG] nFAULT V%d idle:%d boost:%d en:%d p1ms:%d p10ms:%d p30ms:%d rel:%d stby:%d\n",
+    valve, fIdle, fBoost, fEnabled, fP1, fP10, fP30, fRel, fStby);
+#endif
+  if (driverFault) {
+    Serial.printf("[WARN] DRV8833 nFAULT activo durante pulso V%d\n", valve);
+  }
 
   // Actualizar estado en RTC (persiste en deep sleep)
   if (valve == 1) valve1Open = abrir;
@@ -608,6 +667,7 @@ void setup() {
   pinMode(PIN_BIN1,  OUTPUT); digitalWrite(PIN_BIN1,  LOW);
   pinMode(PIN_BIN2,  OUTPUT); digitalWrite(PIN_BIN2,  LOW);
   pinMode(PIN_STBY, OUTPUT); digitalWrite(PIN_STBY, LOW);  // Standby → ahorro (se sube en accionarValvula)
+  pinMode(PIN_FAULT, INPUT);  // pull-up externo R10; GPIO3 strap solo relevante con eFuse JTAG_SEL
   pinMode(PIN_BOOST_EN, OUTPUT); digitalWrite(PIN_BOOST_EN, LOW);  // Boost OFF (10k pulldown en placa)
 
   // OLED: inicializar APAGADO (ahorrar batería)
